@@ -41,43 +41,41 @@ class Train_DSTL(object):
         image = tiff.imread(img_filename).transpose([1, 2, 0])
         # ax.imshow(255 * self._scale_percentile(image), cmap='cubehelix')
         fig, ax, _ = tiff.imshow(255 * self._scale_percentile(image))
-        img_size = image.shape[0:2]
-        self.plot_objects(image_id, img_size, ax=ax)
+        masks = self._get_objects(image_id, ax=ax)
         plt.show()
-        return image
+        return image, masks
 
-    def plot_objects(self, image_id, img_size, ax=None):
+    def _get_objects(self, image_id, ax=None):
+        """ Find all the objects defined in the training set """
         if ax is None:
             fig, ax = plt.subplots()
         # Find xy_limits
-        xy_limits = self.grid_sizes.loc[self.grid_sizes['ImageID'] == image_id, ['Xmax', 'Ymin']].values.reshape(-1)
+        img_size, xy_limits = self._get_image_properties(image_id)
         # Loop over all classes that aren't empty
         objects = self.training_set.loc[(self.training_set['ImageId'] == image_id) & (self.training_set['MultipolygonWKT'] != 'MULTIPOLYGON EMPTY')]
+        masks = []
         for idx, row in objects.iterrows():
-            self.plot_polygons(row['MultipolygonWKT'], img_size, xy_limits, class_type=row['ClassType'], ax=ax)
-            # import pdb; pdb.set_trace()
-        # Display plot
-        plt.show()
+            masks.append(self._make_mask(row['MultipolygonWKT'], img_size, xy_limits, class_type=row['ClassType'], ax=ax))
+        return masks
 
-    def plot_polygons(self, multi_polygon_wkt, img_size, xy_limits, class_type=1, ax=None):
+    def _make_mask(self, multi_polygon_wkt, img_size, xy_limits, class_type=1, ax=None):
+        """
+        Take a multi-polygon and make an image mask that selects all pixels that lie within the multi-polygon
+        """
         # Translate wkt to Shapely Polygon
         shapes = loads(multi_polygon_wkt)  # WKT to Shapely format
-        # Grid to make mask
-        xv, yv = np.meshgrid(range(img_size[1]), range(img_size[0]))
-        xy_grid = np.vstack((xv.reshape(-1), yv.reshape(-1))).T
-        all_patches = []
+        # Make a True/False image using PIL
+        img = Image.new('1', img_size[-1::-1], 0)
+        # Fill in the Image with the polygons
         for shape in shapes:
-            xy_perimeter = np.array(shape.exterior.coords)  # perimeter of polygon
-            xy_scaled = self._convert_xy_to_img_scale(xy_perimeter, img_size, xy_limits)
-            all_patches.append(mpatches.Polygon(xy_scaled, fill=False, color=self.object_colors[class_type], zorder=2))
-        patches = PatchCollection(all_patches, match_original=True)
-        ax.add_collection(patches)
-        # Plot pixels that are in the polygon
-        # Find pixels that are in polygon
-        paths = patches.get_paths()
-        mask = [path.contains_points(xy_grid) for path in paths]
-        if class_type == 1:
-            ax.plot(*xy_grid[mask].T, '+', color=self.object_colors[class_type], zorder=2)
+            xy_perimeter = np.array(shape.exterior.coords)
+            xy_scaled = dstl._convert_xy_to_img_scale(xy_perimeter, img_size, xy_limits)
+            poly = [(coord[0], coord[1]) for coord in xy_scaled]
+            ImageDraw.Draw(img).polygon(poly, fill=1)
+        mask = np.array(img)
+        # Plot mask
+        if ax is not None:
+            ax.contour(mask, colors=self.object_colors[class_type])
         return mask
 
     # Helper Methods
@@ -112,6 +110,24 @@ class Train_DSTL(object):
         xy_scaled = np.vstack([x_scaled, y_scaled]).T
         return xy_scaled
 
+    def _convert_img_to_xy_scale(self, xy, img_size, xy_limits):
+        """ Convert from coordinates on the image scale back to the normalized xy scale of the Polygons
+
+        Args:
+            xy - list of (x, y) tuples where x & y are in image coordinates
+            img_size - Tuple of image (height, width)
+            xy_limits - Tuple of Xmax and Ymin needed to properly scale image
+        Returns:
+            x_norm, y_norm - x and y coordinates normalized to be between 0 < x < 1 and -1 < y < 0
+        """
+        x, y = np.array(xy).T
+        h, w = img_size
+        xmax, ymin = xy_limits
+        x_norm = x * xmax / (w * w / (w + 1))
+        y_norm = y * ymin / (h * h / (h + 1))
+        xy_norm = np.vstack([x_norm, y_norm]).T
+        return xy_norm
+
     def _scale_percentile(self, image):
         """
         Fixes the pixel value range to 2%-98% original distribution of values
@@ -128,6 +144,19 @@ class Train_DSTL(object):
         image = np.reshape(image, orig_shape)
         image = image.clip(0, 1)
         return image
+
+    # Old code - can probably be removed
+    def plot_polygons(self, multi_polygon_wkt, img_size, xy_limits, class_type=1, ax=None):
+        """ Note: Not necessary anymore. """
+        # Translate wkt to Shapely Polygon
+        shapes = loads(multi_polygon_wkt)  # WKT to Shapely format
+        all_patches = []
+        for shape in shapes:
+            xy_perimeter = np.array(shape.exterior.coords)  # perimeter of polygon
+            xy_scaled = self._convert_xy_to_img_scale(xy_perimeter, img_size, xy_limits)
+            all_patches.append(mpatches.Polygon(xy_scaled, fill=False, color=self.object_colors[class_type], zorder=2))
+        patches = PatchCollection(all_patches, match_original=True)
+        ax.add_collection(patches)
 
 
 # Testing functions used to figure out and understand code #
@@ -194,37 +223,62 @@ def find_points_inside_test(all_patches=True):
         plt.show()
 
 
-############
-# Run Code #
-############
-if __name__ == '__main__':
-    # dstl = Train_DSTL()
-    # image = dstl.display_three_band()
-    # paths = find_points_inside_test(all_patches=True)
-
+def make_mask(method='pandas'):
+    """
+    Test different ways to select all pixels within a given MultiPolygon
+    """
     dstl = Train_DSTL()
     image_id = '6120_2_2'
     img_size, xy_limits = dstl._get_image_properties(image_id)
     shapes = loads(dstl.training_set.loc[11, 'MultipolygonWKT'])
     xv, yv = np.meshgrid(range(img_size[1]), range(img_size[0]))
-    xy_grid = np.vstack((xv.reshape(-1), yv.reshape(-1))).T
-    # Note: below code won't work because shapely polygon is in unscaled form
-    # mask = [shapes.contains(shapely.geometry.Point(xy)) for xy in xy_grid[:10]]
+    xy_grid = np.vstack((xv.reshape(-1), yv.reshape(-1))).T  # All possible pixels
 
-    patch_list = []
-    for shape in shapes:
-        xy_perimeter = np.array(shape.exterior.coords)
-        xy_scaled = dstl._convert_xy_to_img_scale(xy_perimeter, img_size, xy_limits)
-        patch_list.append(mpatches.Polygon(xy_scaled, fill=False, color='red', zorder=2))
-    patches = PatchCollection(patch_list, match_original=True)
-    paths = patches.get_paths()
-    # mask = [path.contains_points(xy_grid) for path in paths[:10]]
+    if method == 'pandas':
+        pass
+    elif method == 'bounds':
+        for shape in shapes:
+            xy_perimeter = np.array(shape.exterior.coords)
+            xy_scaled = dstl._convert_xy_to_img_scale(xy_perimeter, img_size, xy_limits)
+            # Keep track of boundaries
+            bounds = shape.bounds
+            xy_lim = dstl._convert_xy_to_img_scale([bounds[:2], bounds[2:]], img_size, xy_limits)
+            xy_min = xy_lim[0].round()
+            xy_max = xy_lim[1].round()
+            x_vec = np.arange(xy_min[0] - 1, xy_min[0] + 2)
+            y_vec = np.arange(xy_min[1] - 1, xy_min[1] + 2)
+            points_in_poly = np.array(np.meshgrid(x_vec, y_vec)).T.reshape(-1, 2)
+            try:
+                possible_pixels = np.vstack((possible_pixels, points_in_poly))
+            except:
+                possible_pixels = points_in_poly
+        norm_coords = dstl._convert_img_to_xy_scale(possible_pixels, img_size, xy_limits)
+        # %timeit shapes.contains(shapely.geometry.Point(norm_coords[0]))
+        # 1 loop, best of 3: 495 ms per loop
+        return norm_coords
+    elif method == 'patches' or method == 'pil':
+        patch_list = []
+        img = Image.new('1', img_size, 0)
+        for shape in shapes:
+            xy_perimeter = np.array(shape.exterior.coords)
+            xy_scaled = dstl._convert_xy_to_img_scale(xy_perimeter, img_size, xy_limits)
+            patch = mpatches.Polygon(xy_scaled, fill=False, color='red', zorder=2)
+            patch_list.append(patch)
+            # PIL
+            path = patch.get_path()
+            poly = [(coord[0], coord[1]) for coord in path.vertices]
+            ImageDraw.Draw(img).polygon(poly, fill=1)
+        mask = np.array(img)
+        patches = PatchCollection(patch_list, match_original=True)
+        # paths = patches.get_paths()
+        return mask
 
-    # Using PIL
-    path0 = patch_list[0].get_path()
-    # poly0 = np.vstack([path0.vertices, path0.vertices[0]])
-    poly0 = path0.vertices
-    img = Image.new('L', img_size, 0)
-    ImageDraw.Draw(img).polygon(poly0, outline=1, fill=1)
-    mask = np.array(img)
 
+############
+# Run Code #
+############
+if __name__ == '__main__':
+    dstl = Train_DSTL()
+    image, masks = dstl.display_three_band()
+    # Select training set:
+    training_set = image[masks[0]]
