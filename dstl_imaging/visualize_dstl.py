@@ -34,55 +34,83 @@ class Train_DSTL(object):
         self.grid_sizes.columns = pd.Index(['ImageID', 'Xmax', 'Ymin'])
         self.object_colors = {1: 'gray', 2: 'blue', 3: 'black', 4: 'brown', 5: 'green', 6: 'yellow', 7: 'turquoise', 8: 'blue', 9: 'red', 10: 'orange'}
 
+    def get_training_set(self, object_class=1):
+        """
+        Create a training set of pixels that are or aren't classified as the desired object
+
+        Returns:
+            training_set - A (m x n) sized numpy array corresponding to the pixel values in each band for the training examples.
+            training_answers - A (m x 1) sized numpy array corresponding to the answer (1 = classified as part of class, 0 = not)
+        """
+        object_df = dstl.training_set.query('ClassType == {:d}'.format(object_class))
+        train_examples = []
+        train_answers = []
+        for idx, row in object_df.iterrows():
+            image = self._get_image(row['ImageId'])
+            mask = self._create_mask(row)
+            train_examples.append(image[mask])
+            train_answers.append([1] * np.shape(image[mask])[0])
+            train_examples.append(image[~mask])
+            train_answers.append([0] * np.shape(image[~mask])[0])
+        training_set = np.concatenate((train_examples))
+        training_answers = np.concatenate((train_answers))
+        return training_set, training_answers
+
     def display_three_band(self, image_id='6120_2_2'):
         """ Display a given map """
-        # fig, ax = plt.subplots()
-        img_filename = 'three_band/{:}.tif'.format(image_id)
-        image = tiff.imread(img_filename).transpose([1, 2, 0])
-        # ax.imshow(255 * self._scale_percentile(image), cmap='cubehelix')
+        image = self._get_image(image_id)
         fig, ax, _ = tiff.imshow(255 * self._scale_percentile(image))
         masks = self._get_objects(image_id, ax=ax)
         plt.show()
         return image, masks
 
     def _get_objects(self, image_id, ax=None):
-        """ Find all the objects defined in the training set """
+        """
+        Find all the objects in a particular image in the training set
+        """
         if ax is None:
             fig, ax = plt.subplots()
-        # Find xy_limits
-        img_size, xy_limits = self._get_image_properties(image_id)
         # Loop over all classes that aren't empty
-        objects = self.training_set.loc[(self.training_set['ImageId'] == image_id) & (self.training_set['MultipolygonWKT'] != 'MULTIPOLYGON EMPTY')]
+        objects = self.training_set.loc[(self.training_set['ImageId'] == image_id)]
         masks = []
         for idx, row in objects.iterrows():
-            masks.append(self._make_mask(row['MultipolygonWKT'], img_size, xy_limits, class_type=row['ClassType'], ax=ax))
+            masks.append(self._create_mask(row, ax=ax))
         return masks
 
-    def _make_mask(self, multi_polygon_wkt, img_size, xy_limits, class_type=1, ax=None):
+    def _create_mask(self, row, ax=None):
         """
-        Take a multi-polygon and make an image mask that selects all pixels that lie within the multi-polygon
+        Given a row in the training set dataframe, return the mask corresponding to the given Multi-Polygon.
         """
-        # Translate wkt to Shapely Polygon
-        shapes = loads(multi_polygon_wkt)  # WKT to Shapely format
-        # Make a True/False image using PIL
-        img = Image.new('1', img_size[-1::-1], 0)
-        # Fill in the Image with the polygons
-        for shape in shapes:
-            xy_perimeter = np.array(shape.exterior.coords)
-            xy_scaled = dstl._convert_xy_to_img_scale(xy_perimeter, img_size, xy_limits)
-            poly = [(coord[0], coord[1]) for coord in xy_scaled]
-            ImageDraw.Draw(img).polygon(poly, fill=1)
-        mask = np.array(img)
-        # Plot mask
-        if ax is not None:
-            ax.contour(mask, colors=self.object_colors[class_type])
+        img_size, xy_limits = self._get_image_properties(row['ImageId'])
+        class_type = row['ClassType']
+        if row['MultipolygonWKT'] != 'MULTIPOLYGON EMPTY':
+            # Translate wkt to Shapely Polygon
+            shapes = loads(row['MultipolygonWKT'])
+            # Make a True/False image using PIL
+            img = Image.new('1', img_size[-1::-1], 0)
+            # Fill in the Image with the polygons
+            for shape in shapes:
+                xy_perimeter = np.array(shape.exterior.coords)
+                xy_scaled = dstl._convert_xy_to_img_scale(xy_perimeter, img_size, xy_limits)
+                poly = [(coord[0], coord[1]) for coord in xy_scaled]
+                ImageDraw.Draw(img).polygon(poly, fill=1)
+            mask = np.array(img)
+            # Plot mask
+            if ax is not None:
+                ax.contour(mask, colors=self.object_colors[class_type])
+        else:
+            mask = np.zeros(img_size, dtype='bool')  # Make mask with no TRUE
         return mask
 
     # Helper Methods
-    def _get_image_properties(self, image_id='6120_2_2'):
-        """ Return the img_size and xy_limits of a given image """
+    def _get_image(self, image_id):
         img_filename = 'three_band/{:}.tif'.format(image_id)
         image = tiff.imread(img_filename).transpose([1, 2, 0])
+        return image
+
+    def _get_image_properties(self, image_id='6120_2_2'):
+        """ Return the img_size and xy_limits of a given image """
+        image = self._get_image(image_id)
         img_size = image.shape[0:2]
         xy_limits = self.grid_sizes.loc[self.grid_sizes['ImageID'] == image_id, ['Xmax', 'Ymin']].values.reshape(-1)
         return img_size, xy_limits
@@ -145,21 +173,8 @@ class Train_DSTL(object):
         image = image.clip(0, 1)
         return image
 
-    # Old code - can probably be removed
-    def plot_polygons(self, multi_polygon_wkt, img_size, xy_limits, class_type=1, ax=None):
-        """ Note: Not necessary anymore. """
-        # Translate wkt to Shapely Polygon
-        shapes = loads(multi_polygon_wkt)  # WKT to Shapely format
-        all_patches = []
-        for shape in shapes:
-            xy_perimeter = np.array(shape.exterior.coords)  # perimeter of polygon
-            xy_scaled = self._convert_xy_to_img_scale(xy_perimeter, img_size, xy_limits)
-            all_patches.append(mpatches.Polygon(xy_scaled, fill=False, color=self.object_colors[class_type], zorder=2))
-        patches = PatchCollection(all_patches, match_original=True)
-        ax.add_collection(patches)
 
 
-# Testing functions used to figure out and understand code #
 def plot_object_test():
     # Get image
     dstl = Train_DSTL()
@@ -279,6 +294,7 @@ def make_mask(method='pandas'):
 ############
 if __name__ == '__main__':
     dstl = Train_DSTL()
-    image, masks = dstl.display_three_band()
+    X, Y = dstl.get_training_set()
+    # image, masks = dstl.display_three_band()
     # Select training set:
-    training_set = image[masks[0]]
+    # training_set = image[masks[0]]
