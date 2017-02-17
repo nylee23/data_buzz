@@ -14,12 +14,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import tifffile as tiff
-# from shapely.geometry import Point
 from shapely.wkt import loads
-import shapely
-# from descartes import PolygonPatch
-import matplotlib.patches as mpatches
-from matplotlib.collections import PatchCollection
 from PIL import Image, ImageDraw
 
 
@@ -34,10 +29,25 @@ class Train_DSTL(object):
         self.grid_sizes.columns = pd.Index(['ImageID', 'Xmax', 'Ymin'])
         self.object_colors = {1: 'gray', 2: 'blue', 3: 'black', 4: 'brown', 5: 'green', 6: 'yellow', 7: 'turquoise', 8: 'blue', 9: 'red', 10: 'orange'}
 
+    def split_training_set(self, object_class=1):
+        """
+        Create a training, CV, and test set using a 60/20/20 split
+
+        Since most of these are skewed classes, we will pay some special attention to make sure that positive class is properly represented in each category.
+        """
+        np.random.seed = 0
+        X, Y = self.get_training_set(object_class=object_class)
+        all_data = np.hstack((X, Y.reshape(-1, 1)))  # One array to make sure X and Y pairs aren't separated when permuting
+        pos_train, pos_cv, pos_test = self._split_data(all_data[Y == 1], shuffle=True)
+        neg_train, neg_cv, neg_test = self._split_data(all_data[Y == 0], shuffle=True)
+        train = np.vstack((pos_train, neg_train))
+        cv = np.vstack((pos_cv, neg_cv))
+        test = np.vstack((pos_test, neg_test))
+        return train, cv, test
+
     def get_training_set(self, object_class=1):
         """
-        Create a training set of pixels that are or aren't classified as the desired object
-
+        Create a training set for a given object class based on individual pixels
         Returns:
             training_set - A (m x n) sized numpy array corresponding to the pixel values in each band for the training examples.
             training_answers - A (m x 1) sized numpy array corresponding to the answer (1 = classified as part of class, 0 = not)
@@ -48,13 +58,41 @@ class Train_DSTL(object):
         for idx, row in object_df.iterrows():
             image = self._get_image(row['ImageId'])
             mask = self._create_mask(row)
-            train_examples.append(image[mask])
-            train_answers.append([1] * np.shape(image[mask])[0])
-            train_examples.append(image[~mask])
-            train_answers.append([0] * np.shape(image[~mask])[0])
+            train_examples.append(image.reshape(-1, 3))
+            train_answers.append(mask.ravel().astype('b'))
         training_set = np.concatenate((train_examples))
         training_answers = np.concatenate((train_answers))
         return training_set, training_answers
+
+    def classify_all_images(self):
+        """
+        Create dataframe containing the classification of all pixels in the full training set
+
+        Warning: Takes a long time to complete code. May not be worth using this representation of data.  Main hangup seems to be concatenating the large pandas dataframe.  Probably better to just leave data in numpy arrays.
+        """
+        classifications = []
+        for image_id in self.training_set['ImageId'].unique():
+            classifications.append(self.classify_image(image_id=image_id))
+            print('Image {:} classified'.format(image_id))
+        training_set = pd.concat(classifications, ignore_index=True)
+        return training_set
+
+    def classify_image(self, image_id='6120_2_2'):
+        """ Figure out the classification for every pixel in a given image """
+        # Create dataframe containing a row for every pixel
+        image = self._get_image(image_id)
+        img_size, xy_limits = self._get_image_properties(image_id)
+        yy, xx = np.meshgrid(range(img_size[1]), range(img_size[0]))
+        triples = image.reshape(-1, 3)
+        # image[x_coord[n], y_coord[n]] = triples[n]
+        classifications = pd.DataFrame({'xx': xx.ravel(), 'yy': yy.ravel(), 'r_band': triples[:, 0], 'g_band': triples[:, 1], 'b_band': triples[:, 2]})
+        classifications['image_id'] = image_id
+        # Add results of training set data
+        objects = self.training_set.loc[self.training_set['ImageId'] == image_id]
+        for idx, row in objects.iterrows():
+            mask = self._create_mask(row)
+            classifications['class_{:}'.format(row['ClassType'])] = mask.ravel().astype('b')  # array of 1's and 0's
+        return classifications
 
     def display_three_band(self, image_id='6120_2_2'):
         """ Display a given map """
@@ -70,8 +108,8 @@ class Train_DSTL(object):
         """
         if ax is None:
             fig, ax = plt.subplots()
-        # Loop over all classes that aren't empty
-        objects = self.training_set.loc[(self.training_set['ImageId'] == image_id)]
+        # Loop over all classes
+        objects = self.training_set.loc[self.training_set['ImageId'] == image_id]
         masks = []
         for idx, row in objects.iterrows():
             masks.append(self._create_mask(row, ax=ax))
@@ -173,120 +211,27 @@ class Train_DSTL(object):
         image = image.clip(0, 1)
         return image
 
+    def _split_data(self, data, ratios=[60, 80], shuffle=True):
+        """
+        Shuffle and split a dataset according to the ratios given
 
+        Args:
+            data - dataset to split, should be of size (m, n+1), where m = number of examples, n = number of features (and the last column is the corresponding answers)
+            ratios - Percentiles at which to split the data. For a training/cross-validation/test split of 60/20/20, use ratios = [60, 80]
+        Returns:
+            results - a tuple, where each element is a sub-array of data. There will be N+1 elements, where N is the number of ratios provided in argument. So, for ratios=[60, 80], will return a tuple of (train, CV, test), where train is 60% of data, CV is 20% of data, and test is 20% of data.
 
-def plot_object_test():
-    # Get image
-    dstl = Train_DSTL()
-    image_id = dstl.training_set.loc[3, 'ImageId']
-    img_filename = 'three_band/{:}.tif'.format(image_id)
-    image = tiff.imread(img_filename).transpose([1, 2, 0])
-    xy_limits = dstl.grid_sizes.loc[dstl.grid_sizes['ImageID'] == image_id, ['Xmax', 'Ymin']].values.reshape(-1)
-    # Load polygons
-    multi_polygon_wkt = dstl.training_set.loc[3, 'MultipolygonWKT']
-    shapes = loads(multi_polygon_wkt)
-    shape = shapes[0]
-    xy_perimeter = np.array(shape.exterior.coords)  # perimeter of polygon
-    xy_scaled = dstl._convert_xy_to_img_scale(xy_perimeter, image.shape[0:2], xy_limits)
-    # Plot
-    fig, ax = plt.subplots()
-    patch = mpatches.Polygon(xy_scaled)
-    ax.add_patch(patch)
-    ax.set_xlim(np.min(xy_scaled.T[0]) * 0.95, np.max(xy_scaled.T[0]) * 1.05)
-    ax.set_ylim(np.min(xy_scaled.T[1]) * 0.95, np.max(xy_scaled.T[1]) * 1.05)
-    plt.show()
-
-
-def find_points_inside_test(all_patches=True):
-    # Get a polygon
-    dstl = Train_DSTL()
-    image_id = '6120_2_2'
-    img_size, xy_limits = dstl._get_image_properties(image_id)
-    shapes = loads(dstl.training_set.loc[11, 'MultipolygonWKT'])
-    if all_patches:
-        xv, yv = np.meshgrid(range(img_size[1]), range(img_size[0]))
-        xy_grid = np.vstack((xv.reshape(-1), yv.reshape(-1))).T
-        mask = [shapes.contains(shapely.geometry.Point(xy)) for xy in xy_grid]
-
-        # patch_list = []
-        # for shape in shapes:
-        #     xy_perimeter = np.array(shape.exterior.coords)
-        #     xy_scaled = dstl._convert_xy_to_img_scale(xy_perimeter, img_size, xy_limits)
-        #     patch_list.append(mpatches.Polygon(xy_scaled, fill=False, color='red', zorder=2))
-        # patches = PatchCollection(patch_list, match_original=True)
-        # paths = patches.get_paths()
-        return mask
-        # mask = [path.contains_points(xy_grid) for path in paths]
-        # return mask
-    else:
-        xy_perimeter = np.array(shapes[np.random.choice(range(len(shapes)))].exterior.coords)
-        xlim = (np.min(xy_perimeter.T[0]) * 0.99, np.max(xy_perimeter.T[0]) * 1.01)
-        ylim = (np.min(xy_perimeter.T[1]) * 0.99, np.max(xy_perimeter.T[1]) * 1.01)
-        patch = mpatches.Polygon(xy_perimeter, zorder=1)
-        # Find points inside polygon
-        path = patch.get_path()
-        xv, yv = np.meshgrid(np.linspace(xlim[0], xlim[1], 10), np.linspace(ylim[0], ylim[1], 10))
-        xy_grid = np.vstack((xv.reshape(-1), yv.reshape(-1))).T
-        mask = path.contains_points(xy_grid)
-        # Plot
-        fig, ax = plt.subplots()
-        ax.add_patch(patch)
-        ax.plot(*xy_grid[mask].T, 'ro', zorder=2)
-        ax.plot(*xy_grid[~mask].T, 'ko', zorder=2)
-        ax.set_xlim(xlim)
-        ax.set_ylim(ylim)
-        plt.show()
-
-
-def make_mask(method='pandas'):
-    """
-    Test different ways to select all pixels within a given MultiPolygon
-    """
-    dstl = Train_DSTL()
-    image_id = '6120_2_2'
-    img_size, xy_limits = dstl._get_image_properties(image_id)
-    shapes = loads(dstl.training_set.loc[11, 'MultipolygonWKT'])
-    xv, yv = np.meshgrid(range(img_size[1]), range(img_size[0]))
-    xy_grid = np.vstack((xv.reshape(-1), yv.reshape(-1))).T  # All possible pixels
-
-    if method == 'pandas':
-        pass
-    elif method == 'bounds':
-        for shape in shapes:
-            xy_perimeter = np.array(shape.exterior.coords)
-            xy_scaled = dstl._convert_xy_to_img_scale(xy_perimeter, img_size, xy_limits)
-            # Keep track of boundaries
-            bounds = shape.bounds
-            xy_lim = dstl._convert_xy_to_img_scale([bounds[:2], bounds[2:]], img_size, xy_limits)
-            xy_min = xy_lim[0].round()
-            xy_max = xy_lim[1].round()
-            x_vec = np.arange(xy_min[0] - 1, xy_min[0] + 2)
-            y_vec = np.arange(xy_min[1] - 1, xy_min[1] + 2)
-            points_in_poly = np.array(np.meshgrid(x_vec, y_vec)).T.reshape(-1, 2)
-            try:
-                possible_pixels = np.vstack((possible_pixels, points_in_poly))
-            except:
-                possible_pixels = points_in_poly
-        norm_coords = dstl._convert_img_to_xy_scale(possible_pixels, img_size, xy_limits)
-        # %timeit shapes.contains(shapely.geometry.Point(norm_coords[0]))
-        # 1 loop, best of 3: 495 ms per loop
-        return norm_coords
-    elif method == 'patches' or method == 'pil':
-        patch_list = []
-        img = Image.new('1', img_size, 0)
-        for shape in shapes:
-            xy_perimeter = np.array(shape.exterior.coords)
-            xy_scaled = dstl._convert_xy_to_img_scale(xy_perimeter, img_size, xy_limits)
-            patch = mpatches.Polygon(xy_scaled, fill=False, color='red', zorder=2)
-            patch_list.append(patch)
-            # PIL
-            path = patch.get_path()
-            poly = [(coord[0], coord[1]) for coord in path.vertices]
-            ImageDraw.Draw(img).polygon(poly, fill=1)
-        mask = np.array(img)
-        patches = PatchCollection(patch_list, match_original=True)
-        # paths = patches.get_paths()
-        return mask
+        """
+        m, _ = data.shape
+        if shuffle:
+            shuffled_ind = np.random.permutation(m)
+            shuffled_data = data[shuffled_ind]
+        else:
+            shuffled_data = data
+        # Split by 60%, 20%, 20%
+        inds = [round(ratio * m) for ratio in ratios]
+        results = np.split(shuffled_data, indices_or_sections=inds)
+        return results
 
 
 ############
@@ -294,7 +239,5 @@ def make_mask(method='pandas'):
 ############
 if __name__ == '__main__':
     dstl = Train_DSTL()
-    X, Y = dstl.get_training_set()
-    # image, masks = dstl.display_three_band()
-    # Select training set:
-    # training_set = image[masks[0]]
+    # X, Y = dstl.get_training_set()
+    # train, cv, test = dstl.split_training_set()
