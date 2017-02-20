@@ -15,6 +15,8 @@ import pandas as pd
 import tifffile as tiff
 from shapely.wkt import loads
 from PIL import Image, ImageDraw
+import pickle
+import os
 
 
 class Train_DSTL(object):
@@ -28,14 +30,37 @@ class Train_DSTL(object):
         self.grid_sizes.columns = pd.Index(['ImageID', 'Xmax', 'Ymin'])
         self.object_colors = {1: 'gray', 2: 'blue', 3: 'black', 4: 'brown', 5: 'green', 6: 'yellow', 7: 'turquoise', 8: 'blue', 9: 'red', 10: 'orange'}
 
-    def split_training_set(self, object_class=1):
+    def load_training_set(self, object_class=1, new=False):
+        hdf_name = 'hdf_files/training_set_class_{:}.h5'.format(object_class)
+        if new and os.path.isfile(hdf_name):
+            os.remove(hdf_name)
+        with pd.HDFStore(hdf_name) as store:
+            try:
+                X_train = store['X_train'].values
+            except:
+                X, Y = self.get_training_set(object_class=object_class)
+                X_train, Y_train, X_cv, Y_cv, X_test, Y_test = self.split_training_set_indices(X, Y)
+                store['X_train'] = pd.DataFrame(X_train)
+                store['Y_train'] = pd.Series(Y_train)
+                store['X_cv'] = pd.DataFrame(X_cv)
+                store['Y_cv'] = pd.Series(Y_cv)
+                store['X_test'] = pd.DataFrame(X_test)
+                store['Y_test'] = pd.Series(Y_test)
+            else:
+                Y_train = store['Y_train'].values
+                X_cv = store['X_cv'].values
+                Y_cv = store['Y_cv'].values
+                X_test = store['X_test'].values
+                Y_test = store['Y_test'].values
+        return X_train, Y_train, X_cv, Y_cv, X_test, Y_test
+
+    def split_training_set_numpy(self, X, Y):
         """
         Create a training, CV, and test set using a 60/20/20 split
 
         Since most of these are skewed classes, we will pay some special attention to make sure that positive class is properly represented in each category.
         """
         np.random.seed = 0
-        X, Y = self.get_training_set(object_class=object_class)
         all_data = np.hstack((X, Y.reshape(-1, 1)))  # One array to make sure X and Y pairs aren't separated when permuting
         pos_train, pos_cv, pos_test = self._split_data(all_data[Y == 1], shuffle=True)
         neg_train, neg_cv, neg_test = self._split_data(all_data[Y == 0], shuffle=True)
@@ -43,6 +68,50 @@ class Train_DSTL(object):
         cv = np.vstack((pos_cv, neg_cv))
         test = np.vstack((pos_test, neg_test))
         return train, cv, test
+
+    def split_training_set_indices(self, X, Y):
+        np.random.seed = 0
+        m = len(Y)
+        indices = np.arange(m)
+        sets = np.zeros(m, dtype=np.int8)
+        for answer in [0, 1]:
+            ind_train, ind_cv, ind_test = self._shuffle_split_indices(indices[Y == answer])
+            sets[ind_cv] = 1
+            sets[ind_test] = 2
+        X_train = X[sets == 0]
+        Y_train = Y[sets == 0]
+        X_cv = X[sets == 1]
+        Y_cv = Y[sets == 1]
+        X_test = X[sets == 2]
+        Y_test = Y[sets == 2]
+        return X_train, Y_train, X_cv, Y_cv, X_test, Y_test
+
+    def split_training_set_pandas(self, object_class=1):
+        np.random.seed = 0
+        X, Y = self.get_training_set(object_class=object_class)
+        m = len(Y)
+        all_data = pd.DataFrame(np.hstack((X, Y.reshape(-1, 1))), columns=['r', 'g', 'b', 'Y'])
+        all_data['set'] = 'train'
+        # sets = np.array(['train'] * m)
+        print('dataframe created')
+        # Negative indices
+        for answer in [0, 1]:
+            ind_train, ind_cv, ind_test = self._shuffle_split_indices(all_data[Y == answer].index.values)
+            print('indices {:} split'.format(answer))
+            all_data[ind_cv, 'set'] = 'cv'
+            all_data[ind_test, 'set'] = 'test'
+            # sets[ind_cv, 'set'] = 'cv'
+            # sets.loc[ind_test, 'set'] = 'test'
+            print('sets {:} filled in'.format(answer))
+        return all_data
+
+    def _shuffle_split_indices(self, indices, ratios=[60, 80]):
+        """ Take indices, shuffle them, and then split them """
+        shuffled_indices = np.random.permutation(indices)
+        m = len(indices)
+        inds = [round(ratio / 100 * m) for ratio in ratios]
+        results = np.split(shuffled_indices, indices_or_sections=inds)
+        return results
 
     def get_training_set(self, object_class=1):
         """
@@ -160,10 +229,22 @@ class Train_DSTL(object):
         else:
             shuffled_data = data
         # Split by 60%, 20%, 20%
-        inds = [round(ratio * m) for ratio in ratios]
+        inds = [round(ratio / 100 * m) for ratio in ratios]
         results = np.split(shuffled_data, indices_or_sections=inds)
         return results
 
+    def _load_pickle(self, filename):
+        try:
+            with open(filename, 'rb') as pickleFile:
+                obj = pickle.load(pickleFile)
+        except UnicodeDecodeError:
+            with open(filename, 'rb') as pickleFile:
+                obj = pickle.load(pickleFile, encoding='latin1')
+        return obj
+
+    def _save_pickle(self, obj, filename):
+        with open(filename, 'wb') as file:
+            pickle.dump(obj, file, protocol=-1)
 
 ############
 # Run Code #
@@ -171,4 +252,4 @@ class Train_DSTL(object):
 if __name__ == '__main__':
     dstl = Train_DSTL()
     # X, Y = dstl.get_training_set()
-    train, cv, test = dstl.split_training_set()
+
