@@ -15,8 +15,11 @@ import pandas as pd
 import tifffile as tiff
 from shapely.wkt import loads
 from PIL import Image, ImageDraw
-import pickle
 import os
+import h5py
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import classification_report
+from sklearn.svm import SVC
 
 
 class Train_DSTL(object):
@@ -30,52 +33,100 @@ class Train_DSTL(object):
         self.grid_sizes.columns = pd.Index(['ImageID', 'Xmax', 'Ymin'])
         self.object_colors = {1: 'gray', 2: 'blue', 3: 'black', 4: 'brown', 5: 'green', 6: 'yellow', 7: 'turquoise', 8: 'blue', 9: 'red', 10: 'orange'}
 
+    # Training
+    def train_logistic(self, object_class=1):
+        """ Train a Logistic Regression """
+        pass
+
+    def cross_validate_svc(self, object_class=1):
+        """
+        http://scikit-learn.org/stable/auto_examples/model_selection/grid_search_digits.html#sphx-glr-auto-examples-model-selection-grid-search-digits-py
+        """
+        X_train, Y_train, X_cv, Y_cv, X_test, Y_test = self.load_training_set(object_class=object_class)
+
+        # Set the parameters by cross-validation
+        tuned_parameters = [{'kernel': ['rbf'], 'gamma': [1e-3, 1e-4], 'C': [1, 10, 100, 1000]}, {'kernel': ['linear'], 'C': [1, 10, 100, 1000]}]
+        scores = ['precision', 'recall']
+
+        for score in scores:
+            print("# Tuning hyper-parameters for %s" % score)
+            print()
+
+            clf = GridSearchCV(SVC(C=1), tuned_parameters, cv=5,
+                               scoring='%s_macro' % score)
+            clf.fit(X_train, Y_train)
+
+            print("Best parameters set found on development set:")
+            print()
+            print(clf.best_params_)
+            print()
+            print("Grid scores on development set:")
+            print()
+            means = clf.cv_results_['mean_test_score']
+            stds = clf.cv_results_['std_test_score']
+            for mean, std, params in zip(means, stds, clf.cv_results_['params']):
+                print("%0.3f (+/-%0.03f) for %r"
+                      % (mean, std * 2, params))
+            print()
+
+            print("Detailed classification report:")
+            print()
+            print("The model is trained on the full development set.")
+            print("The scores are computed on the full evaluation set.")
+            print()
+            y_true, y_pred = Y_test, clf.predict(X_test)
+            print(classification_report(y_true, y_pred))
+            print()
+
+    # Methods to create and save training sets
     def load_training_set(self, object_class=1, new=False):
-        hdf_name = 'hdf_files/training_set_class_{:}.h5'.format(object_class)
-        if new and os.path.isfile(hdf_name):
-            os.remove(hdf_name)
-        with pd.HDFStore(hdf_name) as store:
-            try:
-                X_train = store['X_train'].values
-            except:
-                X, Y = self.get_training_set(object_class=object_class)
-                X_train, Y_train, X_cv, Y_cv, X_test, Y_test = self.split_training_set_indices(X, Y)
-                store['X_train'] = pd.DataFrame(X_train)
-                store['Y_train'] = pd.Series(Y_train)
-                store['X_cv'] = pd.DataFrame(X_cv)
-                store['Y_cv'] = pd.Series(Y_cv)
-                store['X_test'] = pd.DataFrame(X_test)
-                store['Y_test'] = pd.Series(Y_test)
-            else:
-                Y_train = store['Y_train'].values
-                X_cv = store['X_cv'].values
-                Y_cv = store['Y_cv'].values
-                X_test = store['X_test'].values
-                Y_test = store['Y_test'].values
+        """
+        Load the training set, cross-validation set, and test set for a given object class.
+
+        Includes code to load from a H5F file, which was the most efficient way to store the information.
+        """
+        h5f_name = 'h5_files/training_set_class_{:}.h5'.format(object_class)
+        if new and os.path.isfile(h5f_name):
+            os.remove(h5f_name)
+        try:
+            h5f = h5py.File(h5f_name, 'r')
+        except OSError:
+            X, Y = self._get_training_set(object_class=object_class)
+            X_train, Y_train, X_cv, Y_cv, X_test, Y_test = self._split_training_set_indices(X, Y)
+            with h5py.File(h5f_name, 'w') as h5f:
+                h5f.create_dataset('X_train', data=X_train)
+                h5f.create_dataset('Y_train', data=Y_train)
+                h5f.create_dataset('X_cv', data=X_cv)
+                h5f.create_dataset('Y_cv', data=Y_cv)
+                h5f.create_dataset('X_test', data=X_test)
+                h5f.create_dataset('Y_test', data=Y_test)
+        else:
+            X_train = h5f['X_train'][:]
+            Y_train = h5f['Y_train'][:]
+            X_cv = h5f['X_cv'][:]
+            Y_cv = h5f['Y_cv'][:]
+            X_test = h5f['X_test'][:]
+            Y_test = h5f['Y_test'][:]
+            h5f.close()
         return X_train, Y_train, X_cv, Y_cv, X_test, Y_test
 
-    def split_training_set_numpy(self, X, Y):
-        """
-        Create a training, CV, and test set using a 60/20/20 split
+    def _save_all_training_sets(self):
+        """ Create a h5f file for each object class """
+        for obj_class in self.training_set['ClassType'].unique():
+            self.load_training_set(object_class=obj_class, new=True)
 
-        Since most of these are skewed classes, we will pay some special attention to make sure that positive class is properly represented in each category.
+    def _split_training_set_indices(self, X, Y):
         """
-        np.random.seed = 0
-        all_data = np.hstack((X, Y.reshape(-1, 1)))  # One array to make sure X and Y pairs aren't separated when permuting
-        pos_train, pos_cv, pos_test = self._split_data(all_data[Y == 1], shuffle=True)
-        neg_train, neg_cv, neg_test = self._split_data(all_data[Y == 0], shuffle=True)
-        train = np.vstack((pos_train, neg_train))
-        cv = np.vstack((pos_cv, neg_cv))
-        test = np.vstack((pos_test, neg_test))
-        return train, cv, test
+        Given a dataset with known answers, split the dataset into a training set, cross-validation set, and test set.
 
-    def split_training_set_indices(self, X, Y):
+        Note: SKLEARN has a built-in method to do shuffle & splitting: sklearn.model_selection.train_test_split, but it's not any faster (and in fact is a little bit slower)
+        """
         np.random.seed = 0
         m = len(Y)
         indices = np.arange(m)
         sets = np.zeros(m, dtype=np.int8)
         for answer in [0, 1]:
-            ind_train, ind_cv, ind_test = self._shuffle_split_indices(indices[Y == answer])
+            ind_train, ind_cv, ind_test = self._shuffle_split(indices[Y == answer])
             sets[ind_cv] = 1
             sets[ind_test] = 2
         X_train = X[sets == 0]
@@ -86,34 +137,23 @@ class Train_DSTL(object):
         Y_test = Y[sets == 2]
         return X_train, Y_train, X_cv, Y_cv, X_test, Y_test
 
-    def split_training_set_pandas(self, object_class=1):
-        np.random.seed = 0
-        X, Y = self.get_training_set(object_class=object_class)
-        m = len(Y)
-        all_data = pd.DataFrame(np.hstack((X, Y.reshape(-1, 1))), columns=['r', 'g', 'b', 'Y'])
-        all_data['set'] = 'train'
-        # sets = np.array(['train'] * m)
-        print('dataframe created')
-        # Negative indices
-        for answer in [0, 1]:
-            ind_train, ind_cv, ind_test = self._shuffle_split_indices(all_data[Y == answer].index.values)
-            print('indices {:} split'.format(answer))
-            all_data[ind_cv, 'set'] = 'cv'
-            all_data[ind_test, 'set'] = 'test'
-            # sets[ind_cv, 'set'] = 'cv'
-            # sets.loc[ind_test, 'set'] = 'test'
-            print('sets {:} filled in'.format(answer))
-        return all_data
+    def _shuffle_split(self, indices, ratios=[60, 80]):
+        """
+        Shuffle and split the elements of an array according to the ratios given
 
-    def _shuffle_split_indices(self, indices, ratios=[60, 80]):
-        """ Take indices, shuffle them, and then split them """
+        Args:
+            indices - An m-element array
+            ratios - Percentiles at which to split the data. For a training/cross-validation/test split of 60/20/20, use ratios = [60, 80]
+        Returns:
+            results - a tuple, where each element is a sub-array of the input. There will be N+1 elements, where N is the number of ratios provided in argument. So, for ratios=[60, 80], will return a tuple of (train, CV, test), where train is a vector containing 60% of data, CV is 20% of data, and test is 20% of data.
+        """
         shuffled_indices = np.random.permutation(indices)
         m = len(indices)
         inds = [round(ratio / 100 * m) for ratio in ratios]
         results = np.split(shuffled_indices, indices_or_sections=inds)
         return results
 
-    def get_training_set(self, object_class=1):
+    def _get_training_set(self, object_class=1):
         """
         Create a training set for a given object class based on individual pixels
         Returns:
@@ -220,7 +260,6 @@ class Train_DSTL(object):
             ratios - Percentiles at which to split the data. For a training/cross-validation/test split of 60/20/20, use ratios = [60, 80]
         Returns:
             results - a tuple, where each element is a sub-array of data. There will be N+1 elements, where N is the number of ratios provided in argument. So, for ratios=[60, 80], will return a tuple of (train, CV, test), where train is 60% of data, CV is 20% of data, and test is 20% of data.
-
         """
         m, _ = data.shape
         if shuffle:
@@ -233,23 +272,11 @@ class Train_DSTL(object):
         results = np.split(shuffled_data, indices_or_sections=inds)
         return results
 
-    def _load_pickle(self, filename):
-        try:
-            with open(filename, 'rb') as pickleFile:
-                obj = pickle.load(pickleFile)
-        except UnicodeDecodeError:
-            with open(filename, 'rb') as pickleFile:
-                obj = pickle.load(pickleFile, encoding='latin1')
-        return obj
-
-    def _save_pickle(self, obj, filename):
-        with open(filename, 'wb') as file:
-            pickle.dump(obj, file, protocol=-1)
 
 ############
 # Run Code #
 ############
 if __name__ == '__main__':
     dstl = Train_DSTL()
-    # X, Y = dstl.get_training_set()
+    # X, Y = dstl._get_training_set()
 
