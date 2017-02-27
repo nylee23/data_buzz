@@ -4,18 +4,15 @@
 #
 # Author: Nick Lee
 #
-# Description: Preliminary code to visualize and play around with data from DSTL kaggle competition
+# Description: Code to visualize data from DSTL kaggle competition
 #
 # Date: Feb 3, 2017
 #
 
 # Import Libraries
 import numpy as np
-# import pandas as pd
 import matplotlib.pyplot as plt
 import tifffile as tiff
-# from shapely.wkt import loads
-# from PIL import Image, ImageDraw
 from load_dstl import Load_DSTL
 
 
@@ -24,7 +21,7 @@ class Visualize_DSTL(Load_DSTL):
     Class to hold methods for training detection of objects in DSTL images
     """
     def __init__(self):
-        # Get tables from Train_DSTL
+        # Get tables from Load_DSTL
         super().__init__()
 
     def display_three_band(self, image_id='6120_2_2'):
@@ -72,4 +69,3 @@ class Visualize_DSTL(Load_DSTL):
 if __name__ == '__main__':
     dstl_plots = Visualize_DSTL()
     img, masks = dstl_plots.display_three_band()
-
