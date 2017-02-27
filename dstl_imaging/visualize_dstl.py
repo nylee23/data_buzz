@@ -16,10 +16,10 @@ import matplotlib.pyplot as plt
 import tifffile as tiff
 # from shapely.wkt import loads
 # from PIL import Image, ImageDraw
-from train_dstl import Train_DSTL
+from load_dstl import Load_DSTL
 
 
-class Visualize_DSTL(Train_DSTL):
+class Visualize_DSTL(Load_DSTL):
     """
     Class to hold methods for training detection of objects in DSTL images
     """
