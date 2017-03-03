@@ -18,6 +18,7 @@ from PIL import Image, ImageDraw
 import os
 import h5py
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
 
 
 class Load_DSTL(object):
@@ -30,64 +31,99 @@ class Load_DSTL(object):
         self.grid_sizes = pd.read_csv('grid_sizes.csv')
         self.grid_sizes.columns = pd.Index(['ImageID', 'Xmax', 'Ymin'])
         self.object_colors = {1: 'gray', 2: 'blue', 3: 'black', 4: 'brown', 5: 'green', 6: 'yellow', 7: 'turquoise', 8: 'blue', 9: 'red', 10: 'orange'}
+        self._set_test_images()
 
-    def load_subset(self, object_class=1):
+    def _set_test_images(self):
+        # Find image to use as test set - Use the image with 2nd highest number of polygons
+        all_classes = self.training_set['ClassType'].unique()
+        idx_test = []
+        for obj_class in all_classes:
+            object_df = self.training_set.query('ClassType == {:d} & MultipolygonWKT != "MULTIPOLYGON EMPTY"'.format(obj_class))
+            ind_test = object_df['MultipolygonWKT'].apply(len).sort_values(ascending=False).index[1]
+            idx_test.append(ind_test)
+        self.test_images = pd.DataFrame({'index_test': idx_test}, index=pd.Index(all_classes, name='ClassType'))
+
+    def load_subset(self, object_class=1, test_size=0.001, **kwargs):
+        pass
+
+    def create_subset(self, object_class=1, single_image_test=False, fraction=0.001):
         """
-        Load a small subset of the full training set. Will create a training set from randomly sampling from the full training set (and maintaining the same fraction of positive and negative answers). Will create a test set by taking a small region of pixels around one of the polygons in the training set.
-        """
+        Create a small subset of the full training set.
 
-        X_full, Y_full, _, _, _, _ = self.load_full_training_set(object_class=object_class)
-        X_train, Y_train = self._reduce_training_set(X_full, Y_full)
-        X_test, Y_test = self._extract_test_region(object_class=object_class)
-        return X_train, Y_train, X_test, Y_test
+        New training set will be created by randomly selecting a fraction of the full training set (size controlled by fraction).
 
-    def _reduce_training_set(self, X, Y, number=None, fraction=0.001):
-        """
-        Return a subset of the training set.
+        New CV set is either created from splitting the reduced training set by 70/30, or chosen as a small region around one of the polygons in the test image.
 
-        Args:
-            X - Training Examples
-            Y - Training example answers
-            number - Number of training examples to include (ie. 1000 examples)
-            fraction - Float between 0 and 1 that designates what fraction of data to keep.
+        New test set is either randomly chosen from the full test set, or is chosen as a small region around a different polygon in the test image
+
+        Keywords:
+            object_class - Desired ClassType
+
+            single_image_test - Boolean that controls how CV & test set are created. True uses polygons from the test image, False uses fractional splits from the original data set. Default=False
+
+            fraction - Float between 0 and 1. Sets the test_size keyword for train_test_split that determines what fraction of the data to return.
         Returns:
-            X_new - New Training Examples
-            Y_new - New Training example answers
+            X_train - Feature matrix for training set
+            y_train - Answer vector for training set
+            X_cv - Feature matrix for CV set
+            y_cv - Answer vector for CV set
+            X_test - Feature matrix for test set
+            y_test - Answer vector for test set
         """
-        if number is not None:
-            X_trash, X_new, Y_trash, Y_new = train_test_split(X, Y, test_size=int(number), random_state=42)
+        fraction = float(fraction)  # Make sure test_size is in correct dtype
+        # Training set and scaler
+        X_all, y_all, X_test, y_test, scaler = self.load_full_training_set(object_class=object_class)
+        print('training sets loaded')
+        # Reduce Training set to test_size
+        X, _, y, _ = train_test_split(X_all, y_all, test_size=fraction, random_state=42)
+        print('Training set reduced')
+        if single_image_test:
+            X_cv, y_cv = self._extract_test_region(object_class=object_class, seed=0)
+            X_test, y_test = self._extract_test_region(object_class=object_class, seed=42)
+            X_test = scaler.transform(X_test)
+            X_cv = scaler.transform(X_cv)
         else:
-            X_trash, X_new, Y_trash, Y_new = train_test_split(X, Y, test_size=float(fraction), random_state=42)
-        return X_new, Y_new
+            # Create CV set
+            X_train, X_cv, y_train, y_cv = train_test_split(X, y, test_size=0.7, random_state=0)
+            print('CV set created')
+            X_test, _, Y_test, _ = train_test_split(X_test, y_test, test_size=fraction)
+            print('Test set reduced')
+        return X_train, y_train, X_cv, y_cv, X_test, y_test
 
-    def _extract_test_region(self, object_class=1, buffer_size=4, return_ind=False):
+    def _extract_test_region(self, object_class=1, buffer_size=4, return_ind=False, seed=0):
         """
         Extract a small region around a single polygon.
 
         Will create a matrix of features and answers that can be used for a test set. The test set contains pixels in a region around the polygon given by ind_shape.
 
         Note: Does not work for object_class = 3
+
+        Keywords:
+            seed - Use to set randomization seed. Call this function with different seeds to try to get two different polygons from the Multipolygon
         """
+        # Select Training data row that contains test image & masks
+        test_row = self.training_set.loc[self.test_images.loc[8].values[0]]
         # Find first image that contains the desired object_class
-        detected_set = self.training_set.query('MultipolygonWKT != "MULTIPOLYGON EMPTY" & ClassType == {:d}'.format(object_class))
-        mask = self._create_mask(detected_set.iloc[0])
-        img_size, xy_limits, image = self._get_image_properties(detected_set['ImageId'].values[0])
+        mask = self._create_mask(test_row)
+        img_size, xy_limits, image = self._get_image_properties(test_row['ImageId'])
+        all_shapes = loads(test_row['MultipolygonWKT'])
         # Find region around first polygon
+        np.random.seed(seed)
         flag = 0
-        ind_shape = 0
         while flag < 1:
-            shape = loads(detected_set['MultipolygonWKT'].values[0])[ind_shape]
+            # Randomly choose a polygon
+            ind_shape = np.random.randint(0, len(all_shapes))
+            shape = all_shapes[ind_shape]
             xy_perimeter = np.array(shape.exterior.coords)
             xy_scaled = self._convert_xy_to_img_scale(xy_perimeter, img_size, xy_limits)
             # Cut out region around polygon
             xlim = np.round([xy_scaled[:, 0].min() - buffer_size, xy_scaled[:, 0].max() + buffer_size])
             ylim = np.round([xy_scaled[:, 1].min() - buffer_size, xy_scaled[:, 1].max() + buffer_size])
             yy, xx = np.meshgrid(np.arange(*xlim), np.arange(*ylim))
-
             try:
                 triples = np.array([image[int(x), int(y), :] for (x, y) in zip(xx.ravel(), yy.ravel())])
             except IndexError:
-                ind_shape += 1
+                flag = 0
             else:
                 flag = 1
                 mask = np.array([mask[int(x), int(y)] for (x, y) in zip(xx.ravel(), yy.ravel())], dtype='b')
@@ -99,102 +135,80 @@ class Load_DSTL(object):
 
     # Methods to create and save the full training set
     def load_full_training_set(self, object_class=1, new=False):
-        """
-        Load the training set, cross-validation set, and test set for a given object class.
-
-        Args:
-            subset - Set to a number that denotes what percentage of data to return.  Setting subset to 1 or to None will return all the data, and values below 1 will return that fraction of the data
-        """
-        X_train, Y_train, X_cv, Y_cv, X_test, Y_test = self._load_training_set_h5f(object_class=object_class, new=new)
-        return X_train, Y_train, X_cv, Y_cv, X_test, Y_test
-
-    def _load_training_set_h5f(self, object_class=1, new=False):
         h5f_name = 'h5_files/training_set_class_{:}.h5'.format(object_class)
+        scaler_keys = ['mean_', 'var_', 'scale_', 'n_samples_seen_']
         if new and os.path.isfile(h5f_name):
             os.remove(h5f_name)
         try:
             h5f = h5py.File(h5f_name, 'r')
         except OSError:
-            X, Y = self._get_training_set(object_class=object_class)
-            X_train, Y_train, X_cv, Y_cv, X_test, Y_test = self._split_training_set_indices(X, Y)
+            X_train, Y_train, X_test, Y_test, scaler = self._create_training_set(object_class=object_class)
             with h5py.File(h5f_name, 'w') as h5f:
                 h5f.create_dataset('X_train', data=X_train)
                 h5f.create_dataset('Y_train', data=Y_train)
-                h5f.create_dataset('X_cv', data=X_cv)
-                h5f.create_dataset('Y_cv', data=Y_cv)
                 h5f.create_dataset('X_test', data=X_test)
                 h5f.create_dataset('Y_test', data=Y_test)
+                for key in scaler_keys:
+                    h5f.create_dataset(key, data=getattr(scaler, key))
         else:
-            X_train = h5f['X_train'][:]
-            Y_train = h5f['Y_train'][:]
-            X_cv = h5f['X_cv'][:]
-            Y_cv = h5f['Y_cv'][:]
-            X_test = h5f['X_test'][:]
-            Y_test = h5f['Y_test'][:]
+            X_train = h5f['X_train'].value
+            Y_train = h5f['Y_train'].value
+            X_test = h5f['X_test'].value
+            Y_test = h5f['Y_test'].value
+            # Reconstruct scaler
+            scaler = StandardScaler()
+            for key in scaler_keys:
+                setattr(scaler, key, h5f[key].value)
             h5f.close()
-        return X_train, Y_train, X_cv, Y_cv, X_test, Y_test
+        return X_train, Y_train, X_test, Y_test, scaler
 
-    def _save_all_training_sets(self):
+    def _save_training_sets(self, classes=None):
         """ Create a h5f file for each object class """
-        for obj_class in self.training_set['ClassType'].unique():
-            self.load_training_set(object_class=obj_class, new=True)
+        if classes is None:
+            class_types = self.training_set['ClassType'].unique()
+        elif len(classes) == 1:
+            class_types = [classes]
+        else:
+            class_types = classes
+        for obj_class in class_types:
+            self.load_full_training_set(object_class=obj_class, new=True)
+            print('Training Set for Class {:d} complete'.format(obj_class))
 
-    def _split_training_set_indices(self, X, Y):
-        """
-        Given a dataset with known answers, split the dataset into a training set, cross-validation set, and test set.
-
-        Note: SKLEARN has a built-in method to do shuffle & splitting: sklearn.model_selection.train_test_split, but it's not any faster (and in fact is a little bit slower)
-        """
-        np.random.seed = 0
-        m = len(Y)
-        indices = np.arange(m)
-        sets = np.zeros(m, dtype=np.int8)
-        for answer in [0, 1]:
-            ind_train, ind_cv, ind_test = self._shuffle_split(indices[Y == answer])
-            sets[ind_cv] = 1
-            sets[ind_test] = 2
-        X_train = X[sets == 0]
-        Y_train = Y[sets == 0]
-        X_cv = X[sets == 1]
-        Y_cv = Y[sets == 1]
-        X_test = X[sets == 2]
-        Y_test = Y[sets == 2]
-        return X_train, Y_train, X_cv, Y_cv, X_test, Y_test
-
-    def _shuffle_split(self, indices, ratios=[60, 80]):
-        """
-        Shuffle and split the elements of an array according to the ratios given
-
-        Args:
-            indices - An m-element array
-            ratios - Percentiles at which to split the data. For a training/cross-validation/test split of 60/20/20, use ratios = [60, 80]
-        Returns:
-            results - a tuple, where each element is a sub-array of the input. There will be N+1 elements, where N is the number of ratios provided in argument. So, for ratios=[60, 80], will return a tuple of (train, CV, test), where train is a vector containing 60% of data, CV is 20% of data, and test is 20% of data.
-        """
-        shuffled_indices = np.random.permutation(indices)
-        m = len(indices)
-        inds = [round(ratio / 100 * m) for ratio in ratios]
-        results = np.split(shuffled_indices, indices_or_sections=inds)
-        return results
+    def _create_training_set(self, object_class=1):
+        """ Create a normalized training and test set """
+        X_raw, y_train, X_test, y_test = self._get_training_set(object_class=object_class)
+        # Normalize features
+        scaler = StandardScaler().fit(X_raw)
+        X_train = scaler.transform(X_raw)
+        X_test = scaler.transform(X_test)
+        return X_train, y_train, X_test, y_test, scaler
 
     def _get_training_set(self, object_class=1):
         """
-        Create a training set for a given object class based on individual pixels
+        Create a training set and test set for a given object class based on individual pixels.
+
+        Test set is chosen to be the image that contains the 2nd most polygons of the given object_class.
         Returns:
             training_set - A (m x n) sized numpy array corresponding to the pixel values in each band for the training examples.
             training_answers - A (m x 1) sized numpy array corresponding to the answer (1 = classified as part of class, 0 = not)
         """
-        object_df = self.training_set.query('ClassType == {:d}'.format(object_class))
+        object_df = self.training_set.query('ClassType == {:d} & MultipolygonWKT != "MULTIPOLYGON EMPTY"'.format(object_class))
+        # Create training and test sets
         train_examples = []
         train_answers = []
         for idx, row in object_df.iterrows():
             image = self._get_image(row['ImageId'])
             mask = self._create_mask(row)
-            train_examples.append(image.reshape(-1, 3))
-            train_answers.append(mask.ravel().astype('b'))
+            # Check if this image is the test image
+            if idx == self.test_images.loc[object_class].values[0]:
+                test_examples = image.reshape(-1, 3)
+                test_answers = mask.ravel().astype('b')
+            else:
+                train_examples.append(image.reshape(-1, 3))
+                train_answers.append(mask.ravel().astype('d'))
         training_set = np.concatenate((train_examples))
         training_answers = np.concatenate((train_answers))
-        return training_set, training_answers
+        return training_set, training_answers, test_examples, test_answers
 
     def _create_mask(self, row, ax=None):
         """
@@ -274,27 +288,6 @@ class Load_DSTL(object):
         y_norm = y * ymin / (h * h / (h + 1))
         xy_norm = np.vstack([x_norm, y_norm]).T
         return xy_norm
-
-    def _split_data(self, data, ratios=[60, 80], shuffle=True):
-        """
-        Shuffle and split a dataset according to the ratios given
-
-        Args:
-            data - dataset to split, should be of size (m, n+1), where m = number of examples, n = number of features (and the last column is the corresponding answers)
-            ratios - Percentiles at which to split the data. For a training/cross-validation/test split of 60/20/20, use ratios = [60, 80]
-        Returns:
-            results - a tuple, where each element is a sub-array of data. There will be N+1 elements, where N is the number of ratios provided in argument. So, for ratios=[60, 80], will return a tuple of (train, CV, test), where train is 60% of data, CV is 20% of data, and test is 20% of data.
-        """
-        m, _ = data.shape
-        if shuffle:
-            shuffled_ind = np.random.permutation(m)
-            shuffled_data = data[shuffled_ind]
-        else:
-            shuffled_data = data
-        # Split by 60%, 20%, 20%
-        inds = [round(ratio / 100 * m) for ratio in ratios]
-        results = np.split(shuffled_data, indices_or_sections=inds)
-        return results
 
 
 ############
