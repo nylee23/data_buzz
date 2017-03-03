@@ -4,279 +4,216 @@
 #
 # Author: Nick Lee
 #
-# Description: Code to extract and train the training set.
+# Description: Code to train the data
 #
 # Date: Feb 3, 2017
 #
 
 # Import Libraries
+from load_dstl import Load_DSTL
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import GridSearchCV
+from sklearn.svm import SVC
+from sklearn import metrics
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import tifffile as tiff
-from shapely.wkt import loads
-from PIL import Image, ImageDraw
-import os
-import h5py
-from sklearn.model_selection import GridSearchCV
-from sklearn.metrics import classification_report
-from sklearn.svm import SVC
+import seaborn as sns
 
 
-class Train_DSTL(object):
-    """
-    Class to hold methods for training detection of objects in DSTL images
-    """
+class DSTL_Logistic(Load_DSTL):
+    """ Class to do logistic regression """
     def __init__(self):
-        # Save useful tables
-        self.training_set = pd.read_csv('train_wkt_v4.csv')
-        self.grid_sizes = pd.read_csv('grid_sizes.csv')
-        self.grid_sizes.columns = pd.Index(['ImageID', 'Xmax', 'Ymin'])
-        self.object_colors = {1: 'gray', 2: 'blue', 3: 'black', 4: 'brown', 5: 'green', 6: 'yellow', 7: 'turquoise', 8: 'blue', 9: 'red', 10: 'orange'}
+        super().__init__()
 
-    # Training
-    def train_logistic(self, object_class=1):
-        """ Train a Logistic Regression """
-        pass
+    def train_logistic(self, object_class=1, fraction=0.001, plot_df=False):
+        # Get data
+        self._get_training_set(object_class=object_class, fraction=fraction)
+        # Train classifier
+        log_reg = LogisticRegression(solver='sag', random_state=42)
+        log_reg.fit(self.X_train, self.y_train)
+        # Cross validate
+        self.decision_boundary = self.find_decision_boundary(log_reg, plot=plot_df)
+        # Test accuracy
+        jacc_score = self.test_model(log_reg)
+        return jacc_score
 
-    def cross_validate_svc(self, object_class=1):
-        """
-        http://scikit-learn.org/stable/auto_examples/model_selection/grid_search_digits.html#sphx-glr-auto-examples-model-selection-grid-search-digits-py
-        """
-        X_train, Y_train, X_cv, Y_cv, X_test, Y_test = self.load_training_set(object_class=object_class)
-
-        # Set the parameters by cross-validation
-        tuned_parameters = [{'kernel': ['rbf'], 'gamma': [1e-3, 1e-4], 'C': [1, 10, 100, 1000]}, {'kernel': ['linear'], 'C': [1, 10, 100, 1000]}]
-        scores = ['precision', 'recall']
-
-        for score in scores:
-            print("# Tuning hyper-parameters for %s" % score)
-            print()
-
-            clf = GridSearchCV(SVC(C=1), tuned_parameters, cv=5,
-                               scoring='%s_macro' % score)
-            clf.fit(X_train, Y_train)
-
-            print("Best parameters set found on development set:")
-            print()
-            print(clf.best_params_)
-            print()
-            print("Grid scores on development set:")
-            print()
-            means = clf.cv_results_['mean_test_score']
-            stds = clf.cv_results_['std_test_score']
-            for mean, std, params in zip(means, stds, clf.cv_results_['params']):
-                print("%0.3f (+/-%0.03f) for %r"
-                      % (mean, std * 2, params))
-            print()
-
-            print("Detailed classification report:")
-            print()
-            print("The model is trained on the full development set.")
-            print("The scores are computed on the full evaluation set.")
-            print()
-            y_true, y_pred = Y_test, clf.predict(X_test)
-            print(classification_report(y_true, y_pred))
-            print()
-
-    # Methods to create and save training sets
-    def load_training_set(self, object_class=1, new=False):
-        """
-        Load the training set, cross-validation set, and test set for a given object class.
-
-        Includes code to load from a H5F file, which was the most efficient way to store the information.
-        """
-        h5f_name = 'h5_files/training_set_class_{:}.h5'.format(object_class)
-        if new and os.path.isfile(h5f_name):
-            os.remove(h5f_name)
+    def test_model(self, model, pprint=True):
         try:
-            h5f = h5py.File(h5f_name, 'r')
-        except OSError:
-            X, Y = self._get_training_set(object_class=object_class)
-            X_train, Y_train, X_cv, Y_cv, X_test, Y_test = self._split_training_set_indices(X, Y)
-            with h5py.File(h5f_name, 'w') as h5f:
-                h5f.create_dataset('X_train', data=X_train)
-                h5f.create_dataset('Y_train', data=Y_train)
-                h5f.create_dataset('X_cv', data=X_cv)
-                h5f.create_dataset('Y_cv', data=Y_cv)
-                h5f.create_dataset('X_test', data=X_test)
-                h5f.create_dataset('Y_test', data=Y_test)
-        else:
-            X_train = h5f['X_train'][:]
-            Y_train = h5f['Y_train'][:]
-            X_cv = h5f['X_cv'][:]
-            Y_cv = h5f['Y_cv'][:]
-            X_test = h5f['X_test'][:]
-            Y_test = h5f['Y_test'][:]
-            h5f.close()
-        return X_train, Y_train, X_cv, Y_cv, X_test, Y_test
+            boundary = self.decision_boundary
+        except:
+            boundary = self.find_decision_boundary(model)
+        # Evaluate test set
+        dec_func = model.decision_function(self.X_test)
+        y_pred = (dec_func > boundary).astype('b')
+        jaccard_score = metrics.jaccard_similarity_score(self.y_cv, y_pred)
+        if pprint:
+            print(metrics.classification_report(self.y_cv, y_pred))
+            print('Jaccard Score is {:}'.format(jaccard_score))
+        return jaccard_score
 
-    def _save_all_training_sets(self):
-        """ Create a h5f file for each object class """
-        for obj_class in self.training_set['ClassType'].unique():
-            self.load_training_set(object_class=obj_class, new=True)
-
-    def _split_training_set_indices(self, X, Y):
+    def find_decision_boundary(self, model, plot=False):
         """
-        Given a dataset with known answers, split the dataset into a training set, cross-validation set, and test set.
-
-        Note: SKLEARN has a built-in method to do shuffle & splitting: sklearn.model_selection.train_test_split, but it's not any faster (and in fact is a little bit slower)
+        Find the best decision boundary by minimizing F1 score using CV data
         """
-        np.random.seed = 0
-        m = len(Y)
-        indices = np.arange(m)
-        sets = np.zeros(m, dtype=np.int8)
-        for answer in [0, 1]:
-            ind_train, ind_cv, ind_test = self._shuffle_split(indices[Y == answer])
-            sets[ind_cv] = 1
-            sets[ind_test] = 2
-        X_train = X[sets == 0]
-        Y_train = Y[sets == 0]
-        X_cv = X[sets == 1]
-        Y_cv = Y[sets == 1]
-        X_test = X[sets == 2]
-        Y_test = Y[sets == 2]
-        return X_train, Y_train, X_cv, Y_cv, X_test, Y_test
+        # Find possible decision functions
+        dec_func = model.decision_function(self.X_cv)
+        dec_func_range = np.linspace(dec_func[self.y_cv == 1].min(), dec_func[self.y_cv == 1].max(), 20)
+        # Empty arrays
+        prec = []
+        recall = []
+        f1 = []
+        for boundary in dec_func_range:
+            # Make predictions using this decision boundary
+            y_pred = (dec_func > boundary).astype('b')
+            # Score prediction
+            prec.append(metrics.precision_score(self.y_cv, y_pred))
+            recall.append(metrics.recall_score(self.y_cv, y_pred))
+            f1.append(metrics.f1_score(self.y_cv, y_pred))
+        # Find decision boundary that corresponds to best F1 score
+        db_ind = np.argmax(f1)
+        if plot:
+            fig, ax = plt.subplots()
+            ax.plot(dec_func_range, prec, 'r-', label='precision')
+            ax.plot(dec_func_range, recall, 'b-', label='recall')
+            ax.plot(dec_func_range, f1, 'k-', label='F1 score')
+            ax.plot([dec_func_range[db_ind]] * 2, [0, 1], 'k--')
+            ax.legend()
+            plt.show()
+        return dec_func_range[db_ind]
 
-    def _shuffle_split(self, indices, ratios=[60, 80]):
+    def _get_training_set(self, object_class=1, fraction=0.001, **kwargs):
         """
-        Shuffle and split the elements of an array according to the ratios given
-
-        Args:
-            indices - An m-element array
-            ratios - Percentiles at which to split the data. For a training/cross-validation/test split of 60/20/20, use ratios = [60, 80]
-        Returns:
-            results - a tuple, where each element is a sub-array of the input. There will be N+1 elements, where N is the number of ratios provided in argument. So, for ratios=[60, 80], will return a tuple of (train, CV, test), where train is a vector containing 60% of data, CV is 20% of data, and test is 20% of data.
+        Retrieve subset, but perform stratified sampling of training set
         """
-        shuffled_indices = np.random.permutation(indices)
-        m = len(indices)
-        inds = [round(ratio / 100 * m) for ratio in ratios]
-        results = np.split(shuffled_indices, indices_or_sections=inds)
-        return results
+        X_train, y_train, self.X_cv, self.y_cv, self.X_test, self.y_test = self.load_subset(object_class=object_class, fraction=fraction)
+        # Generate a CV sample that is half positive, half negative
+        ind_all = np.arange(len(y_train))
+        ind_pos = ind_all[y_train == 1]
+        ind_neg = ind_all[y_train == 0]
+        neg_subsample = ind_all[np.random.choice(ind_neg, size=len(ind_pos))]
+        self.X_train = np.vstack((X_train[ind_pos], X_train[neg_subsample]))
+        self.y_train = np.hstack((y_train[ind_pos], y_train[neg_subsample]))
 
-    def _get_training_set(self, object_class=1):
-        """
-        Create a training set for a given object class based on individual pixels
-        Returns:
-            training_set - A (m x n) sized numpy array corresponding to the pixel values in each band for the training examples.
-            training_answers - A (m x 1) sized numpy array corresponding to the answer (1 = classified as part of class, 0 = not)
-        """
-        object_df = self.training_set.query('ClassType == {:d}'.format(object_class))
-        train_examples = []
-        train_answers = []
-        for idx, row in object_df.iterrows():
-            image = self._get_image(row['ImageId'])
-            mask = self._create_mask(row)
-            train_examples.append(image.reshape(-1, 3))
-            train_answers.append(mask.ravel().astype('b'))
-        training_set = np.concatenate((train_examples))
-        training_answers = np.concatenate((train_answers))
-        return training_set, training_answers
 
-    def _create_mask(self, row, ax=None):
-        """
-        Given a row in the training set dataframe, return the mask corresponding to the given Multi-Polygon.
-        """
-        img_size, xy_limits, _ = self._get_image_properties(row['ImageId'])
-        class_type = row['ClassType']
-        if row['MultipolygonWKT'] != 'MULTIPOLYGON EMPTY':
-            # Translate wkt to Shapely Polygon
-            shapes = loads(row['MultipolygonWKT'])
-            # Make a True/False image using PIL
-            img = Image.new('1', img_size[-1::-1], 0)
-            # Fill in the Image with the polygons
-            for shape in shapes:
-                xy_perimeter = np.array(shape.exterior.coords)
-                xy_scaled = self._convert_xy_to_img_scale(xy_perimeter, img_size, xy_limits)
-                poly = [(coord[0], coord[1]) for coord in xy_scaled]
-                ImageDraw.Draw(img).polygon(poly, fill=1)
-            mask = np.array(img)
-            # Plot mask
-            if ax is not None:
-                ax.contour(mask, colors=self.object_colors[class_type])
-        else:
-            mask = np.zeros(img_size, dtype='bool')  # Make mask with no TRUE
-        return mask
+# Functions
+def evaluate_sample_size(model=None, object_class=1):
+    """ See how the jaccard score changes with sample size """
+    if model is None:
+        model = DSTL_Logistic()
+    frac_range = np.logspace(-4, -2, 5)
+    jacc = []
+    for fraction in frac_range:
+        jacc.append(model.train_logistic(object_class=object_class, fraction=fraction))
+    plt.plot(frac_range, jacc, 'k-')
+    plt.show()
 
-    # Helper Methods
-    def _get_image(self, image_id):
-        img_filename = 'three_band/{:}.tif'.format(image_id)
-        image = tiff.imread(img_filename).transpose([1, 2, 0])
-        return image
 
-    def _get_image_properties(self, image_id='6120_2_2'):
-        """ Return the img_size and xy_limits of a given image """
-        image = self._get_image(image_id)
-        img_size = image.shape[0:2]
-        xy_limits = self.grid_sizes.loc[self.grid_sizes['ImageID'] == image_id, ['Xmax', 'Ymin']].values.reshape(-1)
-        return img_size, xy_limits, image
+def grid_search():
+    """ Find best parameters for logistic regression """
+    dstl = Load_DSTL()
+    X_train, y_train, X_cv, y_cv, X_test, y_test = dstl.load_subset(fraction=0.01)
+    weights = ['balanced']
+    # Make list of class weight fractions
+    for weight0 in np.logspace(-1.2, -0.8, 10):
+        weights.append({0: weight0, 1: 1 - weight0})
+    parameters = {'class_weight':weights, 'C':[0.1, 1, 10]}
+    log_reg = LogisticRegression()
+    clf = GridSearchCV(log_reg, parameters, scoring='f1')
+    clf.fit(X_train, y_train)
+    return clf
 
-    def _convert_xy_to_img_scale(self, xy, img_size, xy_limits):
-        """
-        Convert a list of xy tuples that are between [0, 1] and [-1, 0] and convert to the corresponding coordinates of an image
 
-        Follows transformation provided here:
-        https://www.kaggle.com/c/dstl-satellite-imagery-feature-detection/details/data-processing-tutorial
+def choose_model():
+    dstl_log = DSTL_Logistic()
+    dstl_log._get_training_set(fraction=0.01)
+    log_reg = LogisticRegression(solver='sag', random_state=0)
+    log_reg_weighted = LogisticRegression(solver='sag', random_state=0, class_weight={0: 0.11, 1: 0.89})
+    log_reg_balanced = LogisticRegression(solver='sag', random_state=0, class_weight='balanced')
+    model_names = ['Unweighted', 'Weighted', 'Balanced']
+    for ii, model in enumerate([log_reg, log_reg_weighted, log_reg_balanced]):
+        model.fit(dstl_log.X_train, dstl_log.y_train)
+        # Evaluate using decision boundary in model
+        print('{:} model has F1 score of {:}'.format(model_names[ii], metrics.f1_score(dstl_log.y_cv, model.predict(dstl_log.X_test))))
+        # Use custom decision boundary
+        dec_bound = dstl_log.find_decision_boundary(model)
+        y_pred = (model.decision_function(dstl_log.X_test) > dec_bound).astype('b')
+        print('{:} model with custom decision boundary has F1 score of {:}'.format(model_names[ii], metrics.f1_score(dstl_log.y_cv, y_pred)))
+    return dstl_log
 
-        Args:
-            xy - list of (x, y) tuples where x & y are normalized
-            img_size - Tuple of image (height, width)
-            xy_limits - Tuple of Xmax and Ymin needed to properly scale image
-        Returns:
-            x_scaled, y_scaled - x and y coordinates scaled to the image
-        """
-        # Extract arrays of x and y
-        x, y = np.array(xy).T
-        h, w = img_size
-        xmax, ymin = xy_limits
-        x_scaled = (w * w / (w + 1)) * x / xmax
-        y_scaled = (h * h / (h + 1)) * y / ymin
-        xy_scaled = np.vstack([x_scaled, y_scaled]).T
-        return xy_scaled
 
-    def _convert_img_to_xy_scale(self, xy, img_size, xy_limits):
-        """ Convert from coordinates on the image scale back to the normalized xy scale of the Polygons
 
-        Args:
-            xy - list of (x, y) tuples where x & y are in image coordinates
-            img_size - Tuple of image (height, width)
-            xy_limits - Tuple of Xmax and Ymin needed to properly scale image
-        Returns:
-            x_norm, y_norm - x and y coordinates normalized to be between 0 < x < 1 and -1 < y < 0
-        """
-        x, y = np.array(xy).T
-        h, w = img_size
-        xmax, ymin = xy_limits
-        x_norm = x * xmax / (w * w / (w + 1))
-        y_norm = y * ymin / (h * h / (h + 1))
-        xy_norm = np.vstack([x_norm, y_norm]).T
-        return xy_norm
+def visualize_training_set(object_class=1):
+    dstl = Load_DSTL()
+    X_train, y_train, X_test, y_test = dstl.load_subset(object_class=1, fraction=1e-4)
+    train_df = pd.DataFrame(X_train, columns=['r', 'g', 'b'])
+    train_df['y'] = y_train
+    sns.pairplot(train_df, hue='y')
+    plt.show()
 
-    def _split_data(self, data, ratios=[60, 80], shuffle=True):
-        """
-        Shuffle and split a dataset according to the ratios given
 
-        Args:
-            data - dataset to split, should be of size (m, n+1), where m = number of examples, n = number of features (and the last column is the corresponding answers)
-            ratios - Percentiles at which to split the data. For a training/cross-validation/test split of 60/20/20, use ratios = [60, 80]
-        Returns:
-            results - a tuple, where each element is a sub-array of data. There will be N+1 elements, where N is the number of ratios provided in argument. So, for ratios=[60, 80], will return a tuple of (train, CV, test), where train is 60% of data, CV is 20% of data, and test is 20% of data.
-        """
-        m, _ = data.shape
-        if shuffle:
-            shuffled_ind = np.random.permutation(m)
-            shuffled_data = data[shuffled_ind]
-        else:
-            shuffled_data = data
-        # Split by 60%, 20%, 20%
-        inds = [round(ratio / 100 * m) for ratio in ratios]
-        results = np.split(shuffled_data, indices_or_sections=inds)
-        return results
+def plot_learning_curve(model='logistic', object_class=1):
+    dstl = Load_DSTL()
+    log_reg = LogisticRegression(solver='sag', random_state=42)
+    train_err = []
+    test_err = []
+    prec = []
+    recall = []
+    f1 = []
+    sample_sizes = np.logspace(-4, -2, 6)
+    for fraction in sample_sizes:
+        X_train, y_train, X_test, y_test = dstl.load_subset(object_class=object_class, fraction=fraction)
+        log_reg.fit(X_train, y_train)
+        y_pred = log_reg.predict(X_test)
+        # Save metrics
+        train_err.append(log_reg.score(X_train, y_train))
+        test_err.append(log_reg.score(X_test, y_test))
+        prec.append(metrics.precision_score(y_test, y_pred))
+        recall.append(metrics.recall_score(y_test, y_pred))
+        f1.append(metrics.f1_score(y_test, y_pred))
+    # plt.plot(sample_sizes, train_err, 'r-')
+    # plt.plot(sample_sizes, test_err, 'b-')
+    plt.plot(sample_sizes, f1, 'k-')
+    plt.show()
 
+
+def svm_learning_curve(object_class=1):
+    dstl = Load_DSTL()
+    svm = SVC()
+    X_train, y_train, X_test, y_test = dstl.load_subset(object_class=object_class, fraction=1e-4)
+    svm.fit(X_train, y_train)
+    y_pred = svm.predict(X_test)
+
+
+    train_err = []
+    train_err = []
+    test_err = []
+    prec = []
+    recall = []
+    f1 = []
+    # sample_sizes = np.logspace(-4, -2, 6)
+    # for fraction in sample_sizes:
+    #     X_train, y_train, X_test, y_test = dstl.load_subset(object_class=object_class, fraction=fraction)
+    #     svm.fit(X_train, y_train)
+    #     y_pred = log_reg.predict(X_test)
+    #     # Save metrics
+    #     train_err.append(log_reg.score(X_train, y_train))
+    #     test_err.append(log_reg.score(X_test, y_test))
+    #     prec.append(metrics.precision_score(y_test, y_pred))
+    #     recall.append(metrics.recall_score(y_test, y_pred))
+    #     f1.append(metrics.f1_score(y_test, y_pred))
+    # # plt.plot(sample_sizes, train_err, 'r-')
+    # # plt.plot(sample_sizes, test_err, 'b-')
+    # plt.plot(sample_sizes, f1, 'k-')
+    # plt.show()
 
 ############
 # Run Code #
 ############
 if __name__ == '__main__':
-    dstl = Train_DSTL()
-    # X, Y = dstl._get_training_set()
+    dstl_log = DSTL_Logistic()
+    dstl = Load_DSTL()
+
+
+
 
