@@ -29,6 +29,7 @@ class Visualize_DSTL(Load_DSTL):
         image = self._get_image(image_id)
         fig, ax, _ = tiff.imshow(255 * self._scale_percentile(image))
         masks = self._get_objects(image_id, ax=ax)
+        ax.set_title(image_id)
         plt.show()
         return image, masks
 
@@ -68,4 +69,4 @@ class Visualize_DSTL(Load_DSTL):
 ############
 if __name__ == '__main__':
     dstl_plots = Visualize_DSTL()
-    img, masks = dstl_plots.display_three_band()
+    # img, masks = dstl_plots.display_three_band()
