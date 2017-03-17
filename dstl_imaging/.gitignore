@@ -42,3 +42,4 @@ Thumbs.db
 # Image files that are too large
 *.tif
 *.h5
+*.xgb
