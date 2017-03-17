@@ -19,6 +19,7 @@ import os
 import h5py
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+import xgboost as xgb
 
 
 class Load_DSTL(object):
@@ -33,33 +34,75 @@ class Load_DSTL(object):
         self.object_colors = {1: 'gray', 2: 'blue', 3: 'black', 4: 'brown', 5: 'green', 6: 'yellow', 7: 'turquoise', 8: 'blue', 9: 'red', 10: 'orange'}
         self._set_test_images()
 
-    def _set_test_images(self):
-        # Find image to use as test set - Use the image with 2nd highest number of polygons
-        all_classes = self.training_set['ClassType'].unique()
-        idx_test = []
-        for obj_class in all_classes:
-            object_df = self.training_set.query('ClassType == {:d} & MultipolygonWKT != "MULTIPOLYGON EMPTY"'.format(obj_class))
-            ind_test = object_df['MultipolygonWKT'].apply(len).sort_values(ascending=False).index[1]
-            idx_test.append(ind_test)
-        self.test_images = pd.DataFrame({'index_test': idx_test}, index=pd.Index(all_classes, name='ClassType'))
+    def load_xgb(self, object_class=1, new=True):
+        """ Shortcut for loading data in XGB format """
+        xgb_name = 'xgb_files/{:}_subset_' + 'class_{:}'.format(object_class) + '.xgb'
+        set_names = ['train', 'train_cv', 'cv', 'test']
+        if new:
+            for name in set_names:
+                try:
+                    os.remove(xgb_name.format(name))
+                except:
+                    pass
+        try:
+            data = []
+            for name in set_names:
+                data.append(xgb.DMatrix(xgb_name.format(name)))
+        except:
+            """ Get training sets in XGB format """
+            data = self.get_xgb()
+            for ii, d_table in enumerate(data):
+                d_table.save_binary(xgb_name.format(set_names[ii]))
+        return data
 
-    def load_subset(self, object_class=1, test_size=0.001, **kwargs):
-        pass
+    def get_xgb(self, object_class=1):
+        """ Get training sets in XGB format """
+        training_subset = self.load_subset(object_class=object_class)
+        # Ratio of test size to train size
+        fraction_cv = len(training_subset[-1]) / len(training_subset[1])
+        # Split training set to create train_cv set
+        X_train, X_train_cv, y_train, y_train_cv = train_test_split(training_subset[0], training_subset[1], test_size=fraction_cv)
+        # Create and save as XGB Data Matrices
+        d_train = xgb.DMatrix(X_train, label=y_train)
+        d_train_cv = xgb.DMatrix(X_train_cv, label=y_train_cv)
+        d_cv = xgb.DMatrix(training_subset[2], label=training_subset[3])
+        d_test = xgb.DMatrix(training_subset[4], label=training_subset[5])
+        return d_train, d_train_cv, d_cv, d_test
 
-    def create_subset(self, object_class=1, single_image_test=False, fraction=0.001):
+    def load_subset(self, object_class=1, how='random', fraction=0.001, new=False):
+        """
+        Return a list of X_train, y_train, X_cv, y_cv, X_test, y_test that contains a subset of the data
+        """
+        h5f_name = 'h5_files/training_subset_class_{:}.h5'.format(object_class)
+        subset_names = ['X_train', 'y_train', 'X_cv', 'y_cv', 'X_test', 'y_test']
+        if new and os.path.isfile(h5f_name):
+            os.remove(h5f_name)
+        try:
+            h5f = h5py.File(h5f_name, 'r')
+        except OSError:
+            subset = self.create_subset(object_class=object_class, how=how, fraction=fraction)
+            with h5py.File(h5f_name, 'w') as h5f:
+                for ii, key in enumerate(subset_names):
+                    h5f.create_dataset(key, data=subset[ii])
+        else:
+            subset = []
+            for ii, key in enumerate(subset_names):
+                subset.append(h5f[key].value)
+            h5f.close()
+        return subset
+
+    def create_subset(self, object_class=1, how='random', fraction=0.001):
         """
         Create a small subset of the full training set.
 
         New training set will be created by randomly selecting a fraction of the full training set (size controlled by fraction).
 
-        New CV set is either created from splitting the reduced training set by 70/30, or chosen as a small region around one of the polygons in the test image.
-
-        New test set is either randomly chosen from the full test set, or is chosen as a small region around a different polygon in the test image
+        CV and test sets are created by splitting the data in various ways, governed by the keyword [how].
 
         Keywords:
             object_class - Desired ClassType
 
-            single_image_test - Boolean that controls how CV & test set are created. True uses polygons from the test image, False uses fractional splits from the original data set. Default=False
+            how - Control how the CV and test sets are created. Options are 'single', or 'random'.  Random creates the test set and CV set from reducing the test set by fraction, and then dividing in two. 'single' creates a CV and test set from individual polygons in the image set.
 
             fraction - Float between 0 and 1. Sets the test_size keyword for train_test_split that determines what fraction of the data to return.
         Returns:
@@ -73,21 +116,16 @@ class Load_DSTL(object):
         fraction = float(fraction)  # Make sure test_size is in correct dtype
         # Training set and scaler
         X_all, y_all, X_test, y_test, scaler = self.load_full_training_set(object_class=object_class)
-        print('training sets loaded')
         # Reduce Training set to test_size
-        X, _, y, _ = train_test_split(X_all, y_all, test_size=fraction, random_state=42)
-        print('Training set reduced')
-        if single_image_test:
+        X_train, _, y_train, _ = train_test_split(X_all, y_all, test_size=fraction, random_state=42)
+        if how.lower() == 'single':
             X_cv, y_cv = self._extract_test_region(object_class=object_class, seed=0)
             X_test, y_test = self._extract_test_region(object_class=object_class, seed=42)
             X_test = scaler.transform(X_test)
             X_cv = scaler.transform(X_cv)
         else:
-            # Create CV set
-            X_train, X_cv, y_train, y_cv = train_test_split(X, y, test_size=0.7, random_state=0)
-            print('CV set created')
-            X_test, _, Y_test, _ = train_test_split(X_test, y_test, test_size=fraction)
-            print('Test set reduced')
+            X_reduced_test, _, y_reduced_test, _ = train_test_split(X_test, y_test, test_size=fraction)
+            X_cv, X_test, y_cv, y_test = train_test_split(X_reduced_test, y_reduced_test, test_size=0.5)
         return X_train, y_train, X_cv, y_cv, X_test, y_test
 
     def _extract_test_region(self, object_class=1, buffer_size=4, return_ind=False, seed=0):
@@ -162,7 +200,7 @@ class Load_DSTL(object):
             h5f.close()
         return X_train, Y_train, X_test, Y_test, scaler
 
-    def _save_training_sets(self, classes=None):
+    def _save_training_sets(self, classes=None, subset=False):
         """ Create a h5f file for each object class """
         if classes is None:
             class_types = self.training_set['ClassType'].unique()
@@ -171,7 +209,10 @@ class Load_DSTL(object):
         else:
             class_types = classes
         for obj_class in class_types:
-            self.load_full_training_set(object_class=obj_class, new=True)
+            if subset:
+                self.load_subset(object_class=obj_class, new=True)
+            else:
+                self.load_full_training_set(object_class=obj_class, new=True)
             print('Training Set for Class {:d} complete'.format(obj_class))
 
     def _create_training_set(self, object_class=1):
@@ -236,6 +277,18 @@ class Load_DSTL(object):
         return mask
 
     # Helper Methods
+    def _set_test_images(self):
+        """
+        Find image to use as test set - Use the image with 2nd highest number of polygons
+        """
+        all_classes = self.training_set['ClassType'].unique()
+        idx_test = []
+        for obj_class in all_classes:
+            object_df = self.training_set.query('ClassType == {:d} & MultipolygonWKT != "MULTIPOLYGON EMPTY"'.format(obj_class))
+            ind_test = object_df['MultipolygonWKT'].apply(len).sort_values(ascending=False).index[1]
+            idx_test.append(ind_test)
+        self.test_images = pd.DataFrame({'index_test': idx_test}, index=pd.Index(all_classes, name='ClassType'))
+
     def _get_image(self, image_id):
         img_filename = 'three_band/{:}.tif'.format(image_id)
         image = tiff.imread(img_filename).transpose([1, 2, 0])
