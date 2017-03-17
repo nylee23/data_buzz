@@ -19,6 +19,43 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+import xgboost as xgb
+
+
+class DSTL_XGBoost(object):
+    """ Use XGBoost to train a model """
+    def __init__(self):
+        """ Initialize """
+        self._get_data()
+
+    def _get_data(self):
+        """ Load all of the relevant training sets """
+        self.dstl = Load_DSTL()
+        training_subset = self.dstl.load_subset()
+        # Split training set to create train_cv set
+        fraction =
+        X_train, X_train_cv, y_train, y_train_cv = train_test_split(X_test, y_test, test_size=fraction)
+
+
+
+    def train_xgboost(self):
+        """ Train an XGBoost system """
+        X_train, y_train, X_cv, y_cv, X_test, y_test = self.data.load_subset()
+        d_train = xgb.DMatrix(X_train, label=y_train)
+        d_cv = xgb.DMatrix(X_cv, label=y_cv)
+        d_test = xgb.DMatrix(X_test, label=y_test)
+
+        # Train XGBoost
+        params = {'bst:max_depth': 3, 'bst:eta': 0.3, 'objective': 'binary:logistic', 'eval_metric': 'auc'}
+        watchlist  = [(d_cv,'eval'), (d_train,'train')]
+        num_round = 2
+        bst = xgb.train(params, d_train, num_round, watchlist)
+
+        # this is prediction
+        preds = bst.predict(d_test)
+        labels = d_test.get_label()
+        print ('error=%f' % ( sum(1 for i in range(len(preds)) if int(preds[i]>0.5)!=labels[i]) /float(len(preds))))
+
 
 
 class DSTL_Logistic(Load_DSTL):
@@ -142,7 +179,6 @@ def choose_model():
     return dstl_log
 
 
-
 def visualize_training_set(object_class=1):
     dstl = Load_DSTL()
     X_train, y_train, X_test, y_test = dstl.load_subset(object_class=1, fraction=1e-4)
@@ -214,6 +250,22 @@ if __name__ == '__main__':
     dstl_log = DSTL_Logistic()
     dstl = Load_DSTL()
 
+    """ Train an XGBoost system """
+    X_train, y_train, X_cv, y_cv, X_test, y_test = dstl.load_subset()
+    d_train = xgb.DMatrix(X_train, label=y_train)
+    d_cv = xgb.DMatrix(X_cv, label=y_cv)
+    d_test = xgb.DMatrix(X_test, label=y_test)
+
+    # Train XGBoost
+    params = {'bst:max_depth': 3, 'bst:eta': 0.3, 'objective': 'binary:logistic', 'eval_metric': 'auc'}
+    watchlist  = [(d_cv,'eval'), (d_train,'train')]
+    num_round = 2
+    bst = xgb.train(params, d_train, num_round, watchlist)
+
+    # this is prediction
+    preds = bst.predict(d_test)
+    labels = d_test.get_label()
+    print ('error=%f' % ( sum(1 for i in range(len(preds)) if int(preds[i]>0.5)!=labels[i]) /float(len(preds))))
 
 
 
