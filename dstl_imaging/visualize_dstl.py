@@ -31,6 +31,7 @@ class_colors = {
                 10: 'rich purple'  # Small vehicle
                 }
 
+
 # General display functions
 def display_three_band(image, mask, true_mask=None, colors='black', true_colors='gray'):
     sns.set_style('white')

@@ -31,9 +31,70 @@ class Load_DSTL(object):
         self.training_set = pd.read_csv('train_wkt_v4.csv')
         self.grid_sizes = pd.read_csv('grid_sizes.csv')
         self.grid_sizes.columns = pd.Index(['ImageID', 'Xmax', 'Ymin'])
-        self.object_colors = {1: 'gray', 2: 'blue', 3: 'black', 4: 'brown', 5: 'green', 6: 'yellow', 7: 'turquoise', 8: 'blue', 9: 'red', 10: 'orange'}
         self._set_test_images()
 
+    def extract_region_pos(self, x_cent, y_cent, image_id='6120_2_2', object_class=1, cutout_size=[20, 20]):
+        """
+        Cut out a region centered on X & Y
+        """
+        # Image properties
+        img_size, xy_limits, image = self._get_image_properties(image_id)
+        # Get mask of desired class type
+        ind = (self.training_set['ClassType'] == object_class) & (self.training_set['ImageId'] == image_id)
+        desired_row = self.training_set.loc[ind].iloc[0]
+        mask = self._create_mask(desired_row)
+        # Cutout desired region
+        xlim = (round(x_cent - cutout_size[0] / 2), round(x_cent + cutout_size[0] / 2))
+        ylim = (round(y_cent - cutout_size[1] / 2), round(y_cent + cutout_size[1] / 2))
+        yy, xx = np.meshgrid(np.arange(*xlim), np.arange(*ylim))
+        img_dim = yy.shape
+        triples = np.array([image[int(x), int(y), :] for (x, y) in zip(xx.ravel(), yy.ravel())])
+        image = triples.reshape(*img_dim, 3)
+        # Cutout mask
+        cutout_mask = np.array([mask[int(x), int(y)] for (x, y) in zip(xx.ravel(), yy.ravel())], dtype='b')
+        image_mask = cutout_mask.reshape(img_dim)
+        return image, image_mask
+
+    def extract_region(self, object_class=1, image_id='6120_2_2', shape_ind=None, seed=0, buffer_size=4):
+        """ Return a region around a shape """
+        # Image properties
+        img_size, xy_limits, image = self._get_image_properties(image_id)
+        # Get all the shapes in the given object_class and ImageID
+        ind = (self.training_set['ClassType'] == object_class) & (self.training_set['ImageId'] == image_id)
+        desired_row = self.training_set.loc[ind].iloc[0]
+        try:
+            all_shapes = loads(desired_row['MultipolygonWKT'])
+        except AttributeError:
+            raise IOError('Invalid Object Class and ImageID combination. There are no polygons for this combination')
+        mask = self._create_mask(desired_row)
+        if shape_ind is None:
+            # Randomly choose a polygon
+            print('Randomly chosing an index with seed = {:}'.format(seed))
+            np.random.seed(seed)
+            ind_shape = np.random.randint(0, len(all_shapes))
+        else:
+            ind_shape = shape_ind
+        shape = all_shapes[ind_shape]
+        # Find limits of region
+        xy_perimeter = np.array(shape.exterior.coords)
+        xy_scaled = self._convert_xy_to_img_scale(xy_perimeter, img_size, xy_limits)
+        # Cut out region around polygon
+        xlim = np.round([xy_scaled[:, 0].min() - buffer_size, xy_scaled[:, 0].max() + buffer_size])
+        ylim = np.round([xy_scaled[:, 1].min() - buffer_size, xy_scaled[:, 1].max() + buffer_size])
+        yy, xx = np.meshgrid(np.arange(*xlim), np.arange(*ylim))
+        img_dim = yy.shape
+        try:
+            triples = np.array([image[int(x), int(y), :] for (x, y) in zip(xx.ravel(), yy.ravel())])
+        except IndexError:
+            print('Desired shape was too close to edge. Rerunning to get a new, randomly chosen shape.')
+            if seed is None:
+                seed = -1
+            triples, mask, ind_shape = self.extract_region(object_class=object_class, image_id=image_id, shape_ind=None, buffer_size=buffer_size, seed=seed + 1)
+        else:
+            mask = np.array([mask[int(x), int(y)] for (x, y) in zip(xx.ravel(), yy.ravel())], dtype='b')
+        return triples, mask, ind_shape, img_dim
+
+    # Old methods for making subsets
     def load_xgb(self, object_class=1, new=True):
         """ Shortcut for loading data in XGB format """
         xgb_name = 'xgb_files/{:}_subset_' + 'class_{:}'.format(object_class) + '.xgb'
@@ -126,7 +187,7 @@ class Load_DSTL(object):
         else:
             X_reduced_test, _, y_reduced_test, _ = train_test_split(X_test, y_test, test_size=fraction)
             X_cv, X_test, y_cv, y_test = train_test_split(X_reduced_test, y_reduced_test, test_size=0.5)
-        return X_train, y_train, X_cv, y_cv, X_test, y_test
+        return X_train, y_train, X_cv, y_cv, X_test, y_test, scaler
 
     def _extract_test_region(self, object_class=1, buffer_size=4, return_ind=False, seed=0):
         """
@@ -251,7 +312,7 @@ class Load_DSTL(object):
         training_answers = np.concatenate((train_answers))
         return training_set, training_answers, test_examples, test_answers
 
-    def _create_mask(self, row, ax=None):
+    def _create_mask(self, row):
         """
         Given a row in the training set dataframe, return the mask corresponding to the given Multi-Polygon.
         """
@@ -269,9 +330,6 @@ class Load_DSTL(object):
                 poly = [(coord[0], coord[1]) for coord in xy_scaled]
                 ImageDraw.Draw(img).polygon(poly, fill=1)
             mask = np.array(img)
-            # Plot mask
-            if ax is not None:
-                ax.contour(mask, colors=self.object_colors[class_type])
         else:
             mask = np.zeros(img_size, dtype='bool')  # Make mask with no TRUE
         return mask
