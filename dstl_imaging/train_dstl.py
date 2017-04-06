@@ -11,8 +11,10 @@
 
 # Import Libraries
 from load_dstl import Load_DSTL
+from visualize_dstl import display_three_band
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import GridSearchCV
+from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 from sklearn import metrics
 import matplotlib.pyplot as plt
@@ -20,6 +22,194 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import xgboost as xgb
+
+
+# Training for Class = 1
+def choose_regions():
+    """
+    Select training sets, CV sets, and test sets as regions where we know there are objects.  Right now, working only with class 1 (buildings)
+    """
+    dstl = Load_DSTL()
+    # Select regions where there are buildings (with red roofs)
+    train_image, train_mask = dstl.extract_region_pos(2300, 3000, cutout_size=[400, 400])
+    test_image, test_mask = dstl.extract_region_pos(1900, 3100, cutout_size=[400, 400])
+    cv_image, cv_mask = dstl.extract_region_pos(950, 1450, cutout_size=[200, 200])
+    return train_image, train_mask, test_image, test_mask, cv_image, cv_mask
+
+
+def sliding_window(image, mask, window_radius=3):
+    """
+    Given an image and a mask, create a feature set that consists of a sliding square, with the corresponding label being the mask value in the center pixel.
+    """
+    height, width = image.shape[:2]
+    features = []
+    for yy in range(window_radius, height - window_radius):
+        for xx in range(window_radius, width - window_radius):
+            features.append(image[yy - window_radius: yy + window_radius + 1, xx - window_radius: xx + window_radius + 1].ravel())
+    labels = mask[window_radius: -1 * window_radius, window_radius: -1 * window_radius].ravel()
+    return features, labels
+
+
+def process_training_set(train_image, train_mask, cv_image, cv_mask, add_training_set=True):
+    if add_training_set:
+        dstl = Load_DSTL()
+        new_image, new_mask = dstl.extract_region_pos(800, 1600, cutout_size=[600, 600])
+        train_features = np.vstack([train_image.reshape(-1, 3), new_image.reshape(-1, 3)])
+        train_labels = np.hstack([train_mask.ravel(), new_mask.ravel()])
+    else:
+        train_features = train_image.reshape(-1, 3)
+        train_labels = train_mask.ravel()
+    cv_features = cv_image.reshape(-1, 3)
+    cv_labels = cv_mask.ravel()
+    return train_features, train_labels, cv_features, cv_labels
+
+
+def train_log_reg(explore_db=False, sliding_windows=True):
+    # Get images
+    train_image, train_mask, test_image, test_mask, cv_image, cv_mask = choose_regions()
+    # Turn images & masks into features & labels
+    if sliding_windows:
+        window_radius = 3
+        train_feat, train_label = sliding_window(train_image, train_mask, window_radius=window_radius)
+        cv_feat, cv_label = sliding_window(cv_image, cv_mask, window_radius=window_radius)
+        test_feat, test_label = sliding_window(test_image, test_mask, window_radius=window_radius)
+        # Make test image smaller for plotting
+        test_image = test_image[window_radius: -1 * window_radius, window_radius: -1 * window_radius]
+        test_mask = test_mask[window_radius: -1 * window_radius, window_radius: -1 * window_radius]
+    else:
+        train_feat = train_image.reshape(-1, 3)
+        train_label = train_mask.ravel()
+        cv_feat = cv_image.reshape(-1, 3)
+        cv_label = cv_mask.ravel()
+        test_feat = cv_image.reshape(-1, 3)
+        test_label = test_mask.ravel()
+
+    # Train logistic regression
+    log_reg = DSTL_LogReg()
+    log_reg.train(train_feat, train_label, X_cv=cv_feat, y_cv=cv_label, plot_df=True)
+    # Predict using best decision boundary
+    pred = log_reg.predict(test_feat)
+    display_three_band(test_image, pred.reshape(test_mask.shape), true_mask=test_mask)
+    # Try out some different decision boundaries
+    if explore_db:
+        for db in np.linspace(-1, 1, 5):
+            log_reg.decision_boundary = db
+            pred = log_reg.predict(test_image.reshape(-1, 3))
+            print('Decision Boundary = {:}'.format(db))
+            display_three_band(test_image, pred.reshape(test_mask.shape))
+
+
+def train_xgb():
+    train_image, train_mask, test_image, test_mask, cv_image, cv_mask = choose_regions()
+    # Create and train classifier
+    xgb_classifier = DSTL_XGB()
+    xgb_classifier.train(train_image.reshape(-1, 3), train_mask.ravel(), X_cv=cv_image.reshape(-1, 3), y_cv=cv_mask.ravel())
+    # Predict using default boundaries
+    pred = xgb_classifier.predict(test_image.reshape(-1, 3))
+    display_three_band(test_image, pred.reshape(test_mask.shape), true_mask=test_mask)
+
+    # Try out a couple of test boundaries
+    for boundary in [0.3, 0.35, 0.4, 0.45, 0.5]:
+        pred = xgb_classifier.predict(test_image.reshape(-1, 3), boundary=boundary)
+        display_three_band(test_image, pred.reshape(test_mask.shape))
+    # Make predictions on test set
+    # pred = xgb_classifier.predict(test_image.reshape(-1, 3))
+    # display_three_band(test_image, pred.reshape(test_mask.shape))
+
+
+class DSTL_XGB(object):
+    """
+    XGBoost Algorithm for classifying objects
+    """
+    def predict(self, features, boundary=0.5):
+        d_test = xgb.DMatrix(self.scaler.transform(features))
+        preds = self.bst.predict(d_test)
+        return (preds > boundary).astype('b')
+
+    def train(self, X_train, y_train, X_cv=None, y_cv=None):
+        # Normalize features
+        self.scaler = StandardScaler().fit(X_train)
+        X_norm = self.scaler.transform(X_train)
+        # Get in XGB format
+        d_train = xgb.DMatrix(X_norm, label=y_train)
+        d_cv = xgb.DMatrix(self.scaler.transform(X_cv), label=y_cv)
+        # Train XGBoost
+        params = {'bst:max_depth': 3, 'bst:eta': 0.3, 'objective': 'binary:logistic', 'eval_metric': 'auc'}
+        watchlist = [(d_cv, 'eval'), (d_train, 'train')]
+        num_round = 2
+        self.bst = xgb.train(params, d_train, num_round, watchlist)
+
+class DSTL_LogReg(object):
+    """
+    Logistic Regression Algorithm for classifying objects
+    """
+    def predict(self, features):
+        """ """
+        # Normalize features using scaler
+        norm_features = self.scaler.transform(features)
+        # Run algorithm
+        if hasattr(self, 'decision_boundary'):
+            dec_func = self.classifier.decision_function(norm_features)
+            pred = (dec_func > self.decision_boundary).astype('b')
+        else:
+            pred = self.classifier.predict(norm_features)
+        # Return predictions
+        return pred
+
+    def train(self, X_train, y_train, X_cv=None, y_cv=None, plot_df=False, **kwargs):
+        """ Train a Logistic Regression algorithm """
+        # Normalize features
+        self.scaler = StandardScaler().fit(X_train)
+        X_norm = self.scaler.transform(X_train)
+        # Train and Cross-validate
+        log_reg = LogisticRegression(**kwargs)
+        if X_cv is not None and y_cv is not None:
+            # Train classifier
+            self.classifier = log_reg
+            self.classifier.fit(X_norm, y_train)
+            # Find best decision boundary using CV set
+            self.find_decision_boundary(X_cv, y_cv, plot=plot_df)
+        else:
+            # Cross-validate using training set
+            weights = ['balanced']
+            # Make list of class weight fractions
+            for weight0 in np.logspace(-1.2, -0.8, 10):
+                weights.append({0: weight0, 1: 1 - weight0})
+            parameters = {'class_weight': weights, 'C': [0.1, 1, 10]}
+            self.classifier = GridSearchCV(log_reg, parameters, scoring='f1')
+            self.classifier.fit(X_train, y_train)
+
+    def find_decision_boundary(self, X_cv, y_cv, plot=False):
+        """
+        Find the best decision boundary by minimizing F1 score using CV data
+        """
+        # Find possible decision functions
+        dec_func = self.classifier.decision_function(self.scaler.transform(X_cv))
+        dec_func_range = np.linspace(dec_func[y_cv == 1].min(), dec_func[y_cv == 1].max(), 20)
+        # Empty arrays
+        prec = []
+        recall = []
+        f1 = []
+        for boundary in dec_func_range:
+            # Make predictions using this decision boundary
+            y_pred = (dec_func > boundary).astype('b')
+            # Score prediction
+            prec.append(metrics.precision_score(y_cv, y_pred))
+            recall.append(metrics.recall_score(y_cv, y_pred))
+            f1.append(metrics.f1_score(y_cv, y_pred))
+        # Find decision boundary that corresponds to best F1 score
+        db_ind = np.argmax(f1)
+        if plot:
+            fig, ax = plt.subplots()
+            ax.plot(dec_func_range, prec, 'r-', label='precision')
+            ax.plot(dec_func_range, recall, 'b-', label='recall')
+            ax.plot(dec_func_range, f1, 'k-', label='F1 score')
+            ax.plot([dec_func_range[db_ind]] * 2, [0, 1], 'k--')
+            ax.legend()
+            plt.show()
+        self.decision_boundary = dec_func_range[db_ind]
+
+
 
 
 class DSTL_XGBoost(object):
@@ -30,13 +220,12 @@ class DSTL_XGBoost(object):
 
     def _get_data(self):
         """ Load all of the relevant training sets """
-        self.dstl = Load_DSTL()
-        training_subset = self.dstl.load_subset()
+        self.data = Load_DSTL()
+        # self.dstl = Load_DSTL()
+        # training_subset = self.dstl.load_subset()
         # Split training set to create train_cv set
-        fraction =
-        X_train, X_train_cv, y_train, y_train_cv = train_test_split(X_test, y_test, test_size=fraction)
-
-
+        # fraction = 0.001
+        # X_train, X_train_cv, y_train, y_train_cv = train_test_split(X_test, y_test, test_size=fraction)
 
     def train_xgboost(self):
         """ Train an XGBoost system """
@@ -55,7 +244,6 @@ class DSTL_XGBoost(object):
         preds = bst.predict(d_test)
         labels = d_test.get_label()
         print ('error=%f' % ( sum(1 for i in range(len(preds)) if int(preds[i]>0.5)!=labels[i]) /float(len(preds))))
-
 
 
 class DSTL_Logistic(Load_DSTL):
@@ -247,25 +435,30 @@ def svm_learning_curve(object_class=1):
 # Run Code #
 ############
 if __name__ == '__main__':
-    dstl_log = DSTL_Logistic()
-    dstl = Load_DSTL()
+    train_image, train_mask, test_image, test_mask, cv_image, cv_mask = choose_regions()
 
-    """ Train an XGBoost system """
-    X_train, y_train, X_cv, y_cv, X_test, y_test = dstl.load_subset()
-    d_train = xgb.DMatrix(X_train, label=y_train)
-    d_cv = xgb.DMatrix(X_cv, label=y_cv)
-    d_test = xgb.DMatrix(X_test, label=y_test)
+    # dstl_log = DSTL_Logistic()
+    # dstl = Load_DSTL()
 
-    # Train XGBoost
-    params = {'bst:max_depth': 3, 'bst:eta': 0.3, 'objective': 'binary:logistic', 'eval_metric': 'auc'}
-    watchlist  = [(d_cv,'eval'), (d_train,'train')]
-    num_round = 2
-    bst = xgb.train(params, d_train, num_round, watchlist)
+    # """ Train an XGBoost system """
+    # X_train, y_train, X_cv, y_cv, X_test, y_test = dstl.load_subset()
+    # d_train = xgb.DMatrix(X_train, label=y_train)
+    # d_cv = xgb.DMatrix(X_cv, label=y_cv)
+    # d_test = xgb.DMatrix(X_test, label=y_test)
 
-    # this is prediction
-    preds = bst.predict(d_test)
-    labels = d_test.get_label()
-    print ('error=%f' % ( sum(1 for i in range(len(preds)) if int(preds[i]>0.5)!=labels[i]) /float(len(preds))))
+    # img_test = dstl_log._extract_test_reg()
+
+
+    # # Train XGBoost
+    # params = {'bst:max_depth': 3, 'bst:eta': 0.3, 'objective': 'binary:logistic', 'eval_metric': 'auc'}
+    # watchlist  = [(d_cv,'eval'), (d_train,'train')]
+    # num_round = 2
+    # bst = xgb.train(params, d_train, num_round, watchlist)
+
+    # # this is prediction
+    # preds = bst.predict(d_test)
+    # labels = d_test.get_label()
+    # print ('error=%f' % ( sum(1 for i in range(len(preds)) if int(preds[i]>0.5)!=labels[i]) /float(len(preds))))
 
 
 
