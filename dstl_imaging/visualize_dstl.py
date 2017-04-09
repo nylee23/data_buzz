@@ -33,16 +33,18 @@ class_colors = {
 
 
 # General display functions
-def display_three_band(image, mask, true_mask=None, colors='black', true_colors='gray'):
+def display_three_band(image, mask, true_mask=None, colors='black', true_colors='gray', title=None):
     sns.set_style('white')
     fig, ax, _ = tiff.imshow(255 * scale_percentile(image))
     if true_mask is not None:
         ax.contour(true_mask, colors=true_colors)
     ax.contour(mask, colors=colors)
+    if title is not None:
+        ax.set_title(title)
     plt.show()
 
 
-def display_three_band_image(image_id='6120_2_2', overlay=True, classes=None):
+def display_three_band_image(image_id='6120_2_2', overlay=True, classes=None, showplot=True):
     """ Display a given map """
     sns.set_style('white')
     dstl = Load_DSTL()
@@ -56,7 +58,9 @@ def display_three_band_image(image_id='6120_2_2', overlay=True, classes=None):
                 mask = dstl._create_mask(row)
                 ax.contour(mask, colors=sns.xkcd_rgb[class_colors[row['ClassType']]])
     ax.set_title(image_id)
-    plt.show()
+    if showplot:
+        plt.show()
+    return ax
 
 
 def scale_percentile(image):
@@ -81,5 +85,4 @@ def scale_percentile(image):
 # Run Code #
 ############
 if __name__ == '__main__':
-    # img, masks = dstl_plots.display_three_band()
     pass
