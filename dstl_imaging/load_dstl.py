@@ -55,7 +55,7 @@ class Load_DSTL(object):
         image_mask = cutout_mask.reshape(img_dim)
         return image, image_mask
 
-    def extract_region(self, object_class=1, image_id='6120_2_2', shape_ind=None, seed=0, buffer_size=4):
+    def extract_region(self, object_class=1, image_id='6120_2_2', shape_ind=None, buffer_size=4):
         """ Return a region around a shape """
         # Image properties
         img_size, xy_limits, image = self._get_image_properties(image_id)
@@ -69,8 +69,6 @@ class Load_DSTL(object):
         mask = self._create_mask(desired_row)
         if shape_ind is None:
             # Randomly choose a polygon
-            print('Randomly chosing an index with seed = {:}'.format(seed))
-            np.random.seed(seed)
             ind_shape = np.random.randint(0, len(all_shapes))
         else:
             ind_shape = shape_ind
@@ -87,13 +85,88 @@ class Load_DSTL(object):
             triples = np.array([image[int(x), int(y), :] for (x, y) in zip(xx.ravel(), yy.ravel())])
         except IndexError:
             print('Desired shape was too close to edge. Rerunning to get a new, randomly chosen shape.')
-            if seed is None:
-                seed = -1
-            triples, mask, ind_shape = self.extract_region(object_class=object_class, image_id=image_id, shape_ind=None, buffer_size=buffer_size, seed=seed + 1)
+            triples, mask, ind_shape, img_dim = self.extract_region(object_class=object_class, image_id=image_id, shape_ind=None, buffer_size=buffer_size)
         else:
             mask = np.array([mask[int(x), int(y)] for (x, y) in zip(xx.ravel(), yy.ravel())], dtype='b')
         return triples, mask, ind_shape, img_dim
 
+    def _create_mask(self, row):
+        """
+        Given a row in the training set dataframe, return the mask corresponding to the given Multi-Polygon.
+        """
+        img_size, xy_limits, _ = self._get_image_properties(row['ImageId'])
+        class_type = row['ClassType']
+        if row['MultipolygonWKT'] != 'MULTIPOLYGON EMPTY':
+            # Translate wkt to Shapely Polygon
+            shapes = loads(row['MultipolygonWKT'])
+            # Make a True/False image using PIL
+            img = Image.new('1', img_size[-1::-1], 0)
+            # Fill in the Image with the polygons
+            for shape in shapes:
+                xy_perimeter = np.array(shape.exterior.coords)
+                xy_scaled = self._convert_xy_to_img_scale(xy_perimeter, img_size, xy_limits)
+                poly = [(coord[0], coord[1]) for coord in xy_scaled]
+                ImageDraw.Draw(img).polygon(poly, fill=1)
+            mask = np.array(img)
+        else:
+            mask = np.zeros(img_size, dtype='bool')  # Make mask with no TRUE
+        return mask
+
+    def _get_image(self, image_id):
+        img_filename = 'three_band/{:}.tif'.format(image_id)
+        image = tiff.imread(img_filename).transpose([1, 2, 0])
+        return image
+
+    def _get_image_properties(self, image_id='6120_2_2'):
+        """ Return the img_size and xy_limits of a given image """
+        image = self._get_image(image_id)
+        img_size = image.shape[0:2]
+        xy_limits = self.grid_sizes.loc[self.grid_sizes['ImageID'] == image_id, ['Xmax', 'Ymin']].values.reshape(-1)
+        return img_size, xy_limits, image
+
+    def _convert_xy_to_img_scale(self, xy, img_size, xy_limits):
+        """
+        Convert a list of xy tuples that are between [0, 1] and [-1, 0] and convert to the corresponding coordinates of an image
+
+        Follows transformation provided here:
+        https://www.kaggle.com/c/dstl-satellite-imagery-feature-detection/details/data-processing-tutorial
+
+        Args:
+            xy - list of (x, y) tuples where x & y are normalized
+            img_size - Tuple of image (height, width)
+            xy_limits - Tuple of Xmax and Ymin needed to properly scale image
+        Returns:
+            x_scaled, y_scaled - x and y coordinates scaled to the image
+        """
+        # Extract arrays of x and y
+        x, y = np.array(xy).T
+        h, w = img_size
+        xmax, ymin = xy_limits
+        x_scaled = (w * w / (w + 1)) * x / xmax
+        y_scaled = (h * h / (h + 1)) * y / ymin
+        xy_scaled = np.vstack([x_scaled, y_scaled]).T
+        return xy_scaled
+
+    def _convert_img_to_xy_scale(self, xy, img_size, xy_limits):
+        """ Convert from coordinates on the image scale back to the normalized xy scale of the Polygons
+
+        Args:
+            xy - list of (x, y) tuples where x & y are in image coordinates
+            img_size - Tuple of image (height, width)
+            xy_limits - Tuple of Xmax and Ymin needed to properly scale image
+        Returns:
+            x_norm, y_norm - x and y coordinates normalized to be between 0 < x < 1 and -1 < y < 0
+        """
+        x, y = np.array(xy).T
+        h, w = img_size
+        xmax, ymin = xy_limits
+        x_norm = x * xmax / (w * w / (w + 1))
+        y_norm = y * ymin / (h * h / (h + 1))
+        xy_norm = np.vstack([x_norm, y_norm]).T
+        return xy_norm
+
+
+    # Unused, old methods
     # Old methods for making subsets
     def load_xgb(self, object_class=1, new=True):
         """ Shortcut for loading data in XGB format """
@@ -312,28 +385,6 @@ class Load_DSTL(object):
         training_answers = np.concatenate((train_answers))
         return training_set, training_answers, test_examples, test_answers
 
-    def _create_mask(self, row):
-        """
-        Given a row in the training set dataframe, return the mask corresponding to the given Multi-Polygon.
-        """
-        img_size, xy_limits, _ = self._get_image_properties(row['ImageId'])
-        class_type = row['ClassType']
-        if row['MultipolygonWKT'] != 'MULTIPOLYGON EMPTY':
-            # Translate wkt to Shapely Polygon
-            shapes = loads(row['MultipolygonWKT'])
-            # Make a True/False image using PIL
-            img = Image.new('1', img_size[-1::-1], 0)
-            # Fill in the Image with the polygons
-            for shape in shapes:
-                xy_perimeter = np.array(shape.exterior.coords)
-                xy_scaled = self._convert_xy_to_img_scale(xy_perimeter, img_size, xy_limits)
-                poly = [(coord[0], coord[1]) for coord in xy_scaled]
-                ImageDraw.Draw(img).polygon(poly, fill=1)
-            mask = np.array(img)
-        else:
-            mask = np.zeros(img_size, dtype='bool')  # Make mask with no TRUE
-        return mask
-
     # Helper Methods
     def _set_test_images(self):
         """
@@ -347,59 +398,6 @@ class Load_DSTL(object):
             idx_test.append(ind_test)
         self.test_images = pd.DataFrame({'index_test': idx_test}, index=pd.Index(all_classes, name='ClassType'))
 
-    def _get_image(self, image_id):
-        img_filename = 'three_band/{:}.tif'.format(image_id)
-        image = tiff.imread(img_filename).transpose([1, 2, 0])
-        return image
-
-    def _get_image_properties(self, image_id='6120_2_2'):
-        """ Return the img_size and xy_limits of a given image """
-        image = self._get_image(image_id)
-        img_size = image.shape[0:2]
-        xy_limits = self.grid_sizes.loc[self.grid_sizes['ImageID'] == image_id, ['Xmax', 'Ymin']].values.reshape(-1)
-        return img_size, xy_limits, image
-
-    def _convert_xy_to_img_scale(self, xy, img_size, xy_limits):
-        """
-        Convert a list of xy tuples that are between [0, 1] and [-1, 0] and convert to the corresponding coordinates of an image
-
-        Follows transformation provided here:
-        https://www.kaggle.com/c/dstl-satellite-imagery-feature-detection/details/data-processing-tutorial
-
-        Args:
-            xy - list of (x, y) tuples where x & y are normalized
-            img_size - Tuple of image (height, width)
-            xy_limits - Tuple of Xmax and Ymin needed to properly scale image
-        Returns:
-            x_scaled, y_scaled - x and y coordinates scaled to the image
-        """
-        # Extract arrays of x and y
-        x, y = np.array(xy).T
-        h, w = img_size
-        xmax, ymin = xy_limits
-        x_scaled = (w * w / (w + 1)) * x / xmax
-        y_scaled = (h * h / (h + 1)) * y / ymin
-        xy_scaled = np.vstack([x_scaled, y_scaled]).T
-        return xy_scaled
-
-    def _convert_img_to_xy_scale(self, xy, img_size, xy_limits):
-        """ Convert from coordinates on the image scale back to the normalized xy scale of the Polygons
-
-        Args:
-            xy - list of (x, y) tuples where x & y are in image coordinates
-            img_size - Tuple of image (height, width)
-            xy_limits - Tuple of Xmax and Ymin needed to properly scale image
-        Returns:
-            x_norm, y_norm - x and y coordinates normalized to be between 0 < x < 1 and -1 < y < 0
-        """
-        x, y = np.array(xy).T
-        h, w = img_size
-        xmax, ymin = xy_limits
-        x_norm = x * xmax / (w * w / (w + 1))
-        y_norm = y * ymin / (h * h / (h + 1))
-        xy_norm = np.vstack([x_norm, y_norm]).T
-        return xy_norm
-
 
 ############
 # Run Code #
@@ -407,4 +405,3 @@ class Load_DSTL(object):
 if __name__ == '__main__':
     dstl = Load_DSTL()
     # X, Y = dstl._get_training_set()
-
