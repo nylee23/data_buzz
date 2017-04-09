@@ -165,10 +165,9 @@ class Load_DSTL(object):
         xy_norm = np.vstack([x_norm, y_norm]).T
         return xy_norm
 
-
+    ###############################
     # Unused, old methods
-    # Old methods for making subsets
-    def load_xgb(self, object_class=1, new=True):
+    def _load_xgb(self, object_class=1, new=True):
         """ Shortcut for loading data in XGB format """
         xgb_name = 'xgb_files/{:}_subset_' + 'class_{:}'.format(object_class) + '.xgb'
         set_names = ['train', 'train_cv', 'cv', 'test']
@@ -189,7 +188,7 @@ class Load_DSTL(object):
                 d_table.save_binary(xgb_name.format(set_names[ii]))
         return data
 
-    def get_xgb(self, object_class=1):
+    def _get_xgb(self, object_class=1):
         """ Get training sets in XGB format """
         training_subset = self.load_subset(object_class=object_class)
         # Ratio of test size to train size
@@ -203,7 +202,7 @@ class Load_DSTL(object):
         d_test = xgb.DMatrix(training_subset[4], label=training_subset[5])
         return d_train, d_train_cv, d_cv, d_test
 
-    def load_subset(self, object_class=1, how='random', fraction=0.001, new=False):
+    def _load_subset(self, object_class=1, how='random', fraction=0.001, new=False):
         """
         Return a list of X_train, y_train, X_cv, y_cv, X_test, y_test that contains a subset of the data
         """
@@ -225,7 +224,7 @@ class Load_DSTL(object):
             h5f.close()
         return subset
 
-    def create_subset(self, object_class=1, how='random', fraction=0.001):
+    def _create_subset(self, object_class=1, how='random', fraction=0.001):
         """
         Create a small subset of the full training set.
 
@@ -306,7 +305,7 @@ class Load_DSTL(object):
         return results
 
     # Methods to create and save the full training set
-    def load_full_training_set(self, object_class=1, new=False):
+    def _load_full_training_set(self, object_class=1, new=False):
         h5f_name = 'h5_files/training_set_class_{:}.h5'.format(object_class)
         scaler_keys = ['mean_', 'var_', 'scale_', 'n_samples_seen_']
         if new and os.path.isfile(h5f_name):
